@@ -37,6 +37,11 @@ private:
 
 namespace detail {
 
+// 去掉行尾 '\r'(健壮吃 CRLF 输入,如 Python csv.writer 的 \r\n)。
+inline void chomp_cr(std::string& s) {
+  if (!s.empty() && s.back() == '\r') s.pop_back();
+}
+
 inline void split_csv(std::string_view line, std::vector<std::string_view>& out) {
   out.clear();
   std::size_t start = 0;
@@ -65,6 +70,7 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
 
   std::string header;
   if (!std::getline(f, header)) return std::unexpected(Error::CsvSchema);
+  detail::chomp_cr(header);
 
   std::vector<std::string_view> hcols;
   detail::split_csv(header, hcols);
@@ -92,6 +98,7 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
   std::string                   line;
   std::vector<std::string_view> fields;
   while (std::getline(f, line)) {
+    detail::chomp_cr(line);
     if (line.empty()) continue;
     detail::split_csv(line, fields);
     if (fields.size() != hcols.size()) { ++skipped; continue; }  // 字段数不符 → 跳

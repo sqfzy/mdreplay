@@ -61,8 +61,8 @@ def convert_file(src: Path, out_dir: Path, dry_run: bool) -> tuple[int, int, int
         if not dry_run:
             book_f = book_path.open("w", newline="")
             trade_f = trade_path.open("w", newline="")
-            book_w = csv.writer(book_f)
-            trade_w = csv.writer(trade_f)
+            book_w = csv.writer(book_f, lineterminator="\n")
+            trade_w = csv.writer(trade_f, lineterminator="\n")
             book_w.writerow(BOOK_HEADER)
             trade_w.writerow(TRADE_HEADER)
 
