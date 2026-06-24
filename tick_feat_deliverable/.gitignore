@@ -1,0 +1,21 @@
+# 数据产物(GB 级, 不入库) ──────────────────────────────
+raw_*/            # 原始 WS JSONL (collect 产物)
+formatted*/       # 标准 64 列 parquet+csv (format 产物)
+mine_*/           # C++ 输出
+mine_stream/      # 流式引擎输出
+ref_csv/          # python 参照输出
+*.jsonl
+*.log
+
+# 散落的单测/对拍中间产物 ──────────────────────────────
+*.csv
+*.parquet
+transaction_report.json
+
+# C++ 构建 ──────────────────────────────────────────────
+cpp/build/
+cpp/.xmake/
+compile_commands.json
+
+# 杂项 ──────────────────────────────────────────────────
+__MACOSX/
