@@ -549,9 +549,36 @@ static void test_book_depth_of() {
   CHECK(!book_depth_of([](std::size_t k) { return k >= 1 && k <= 5; }).has_value());           // 含_5 >5
 }
 
+// 退化文件:只有表头 → 载入成功但空源(不崩);真空文件(无表头)→ CsvSchema。
+static void test_degenerate_files() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_degen";
+  fs::create_directories(dir);
+  // 只有表头,无数据行
+  {
+    const std::string p = dir + "/h.book.csv";
+    { std::ofstream o(p); o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n"; }
+    SkipStats  sk;
+    const auto src = load_csv_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    CHECK(src.has_value() && (*src)->peek() == nullptr);  // 空源,不崩
+  }
+  // 真空文件(无表头)→ CsvSchema
+  {
+    const std::string p = dir + "/e.book.csv";
+    { std::ofstream o(p); }  // 0 字节
+    SkipStats  sk;
+    const auto src = load_csv_source(p, Kind::Book, sk);
+    CHECK(!src.has_value());  // 缺表头
+  }
+  fs::remove_all(dir);
+}
+
 int main() {
   test_fixed();
   test_book_depth_of();
+  test_degenerate_files();
   test_clock();
   test_merge();
   test_config();
