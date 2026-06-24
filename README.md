@@ -66,7 +66,17 @@ level        = "info"     # trace|debug|info|warn|error
 progress_sec = 5
 ```
 
-CLI 覆盖:`--config <path>` `--realtime <0~1>` `--dir <d>` `--start <dt>` `--end <dt>`。
+**所有配置项都有对应 CLI**(覆盖 config.toml),flag 名镜像配置路径:
+
+| 配置项 | CLI |
+|---|---|
+| `input.format` / `input.dir` | `--format` / `--dir` |
+| `replay.realtime` / `start` / `end` | `--realtime` / `--start` / `--end` |
+| `output[i].format` / `shm` / `create` | `--output.<i>.format` / `--output.<i>.shm` / `--output.<i>.create` |
+| `log.level` / `progress_sec` | `--log-level` / `--progress-sec` |
+| — | `--config <path>`、`--help` |
+
+`<i>` 是 `[[output]]` 数组下标(0=第一个)。`mdreplay --help` 查看完整用法。
 
 ## 构建 / 运行
 
