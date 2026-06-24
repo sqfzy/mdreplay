@@ -5,12 +5,18 @@
 // nullptr = 耗尽。各格式解析器(csv/json)都把记录载入 LoadedSource —— 核心只认本接口,与格式无关。
 
 #include <cstddef>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "core/record.hpp"
 
 namespace mdreplay {
+
+// 去掉行尾 '\r'(健壮吃 CRLF,如 Python csv.writer 的 \r\n)。csv/json 解析共用。
+inline void chomp_cr(std::string& s) {
+  if (!s.empty() && s.back() == '\r') s.pop_back();
+}
 
 struct Source {
   virtual ~Source() = default;

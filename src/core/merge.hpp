@@ -5,19 +5,16 @@
 // 时间窗 [start_ns, end_ns] 闭区间过滤:头 < start 跳过;全局最小 > end 即提前终止(各源已有序)。
 
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
 #include <vector>
 
-#include "input/source.hpp"
 #include "core/record.hpp"
+#include "core/window.hpp"  // kNoStart / kNoEnd
+#include "input/source.hpp"
 
 namespace mdreplay {
-
-inline constexpr std::int64_t kNoStart = std::numeric_limits<std::int64_t>::min();
-inline constexpr std::int64_t kNoEnd   = std::numeric_limits<std::int64_t>::max();
 
 class Merger {
 public:

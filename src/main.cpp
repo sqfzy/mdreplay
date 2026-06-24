@@ -65,6 +65,33 @@ void print_usage() {
   return std::nullopt;
 }
 
+// 严格数值解析:必须整串消费,否则 nullopt(避免 atof/atoi 把坏值静默归 0)。
+[[nodiscard]] std::optional<double> parse_double(const std::string& s) {
+  char*        end = nullptr;
+  const double v   = std::strtod(s.c_str(), &end);
+  if (end == s.c_str() || *end != '\0') return std::nullopt;
+  return v;
+}
+[[nodiscard]] std::optional<int> parse_int(const std::string& s) {
+  char*      end = nullptr;
+  const long v   = std::strtol(s.c_str(), &end, 10);
+  if (end == s.c_str() || *end != '\0') return std::nullopt;
+  return static_cast<int>(v);
+}
+
+// log-level 串 → spdlog 枚举。兼容 warn/warning、error/err;未知 → nullopt(由调用方报错退出)。
+[[nodiscard]] std::optional<spdlog::level::level_enum> parse_log_level(std::string_view s) {
+  using L = spdlog::level::level_enum;
+  if (s == "trace") return L::trace;
+  if (s == "debug") return L::debug;
+  if (s == "info") return L::info;
+  if (s == "warn" || s == "warning") return L::warn;
+  if (s == "error" || s == "err") return L::err;
+  if (s == "critical") return L::critical;
+  if (s == "off") return L::off;
+  return std::nullopt;
+}
+
 // 应用 "--output.<key> <val>" 覆盖到 cfg.output(镜像 [output] 表路径)。
 [[nodiscard]] bool apply_output(Config& cfg, std::string_view key, const std::string& val) {
   if (key == "format") cfg.output.format = val;
@@ -96,11 +123,15 @@ void print_usage() {
     else if (a == "--format") ov_format = next();
     else if (a == "--dir") ov_dir = next();
     else if (a == "--kind") ov_kind = next();
-    else if (a == "--realtime") ov_realtime = std::atof(next().c_str());
+    else if (a == "--realtime") {
+      if (!(ov_realtime = parse_double(next()))) { spdlog::error("--realtime 需数字"); return std::nullopt; }
+    }
     else if (a == "--start") ov_start = next();
     else if (a == "--end") ov_end = next();
     else if (a == "--log-level") ov_log = next();
-    else if (a == "--progress-sec") ov_progress = std::atoi(next().c_str());
+    else if (a == "--progress-sec") {
+      if (!(ov_progress = parse_int(next()))) { spdlog::error("--progress-sec 需整数"); return std::nullopt; }
+    }
     else if (a.starts_with("--output."))
       out_ovr.emplace_back(a.substr(std::string_view("--output.").size()), next());
     else { spdlog::error("unknown arg: {} (--help 查看用法)", a); return std::nullopt; }
@@ -188,13 +219,16 @@ struct Output {
   return Output{{}, std::move(*s)};
 }
 
-[[nodiscard]] Result<std::vector<std::unique_ptr<mdreplay::Source>>>
+[[nodiscard]] std::vector<std::unique_ptr<mdreplay::Source>>
 load_sources(const Config& cfg, Kind kind, std::size_t& skipped) {
   std::vector<std::unique_ptr<mdreplay::Source>> sources;
   for (const auto& fi : mdreplay::discover(cfg.dir, kind, cfg.input_format)) {
     auto s = (cfg.input_format == "json") ? mdreplay::load_json_source(fi.path, fi.kind, skipped)
                                           : mdreplay::load_csv_source(fi.path, fi.kind, skipped);
-    if (!s) return std::unexpected(s.error());
+    if (!s) {  // 单文件错误(打不开/缺列)→ 命名跳过、不中断其余文件
+      spdlog::warn("skip input '{}': {}", fi.path, mdreplay::to_string(s.error()));
+      continue;
+    }
     sources.push_back(std::move(*s));
   }
   return sources;
@@ -217,33 +251,45 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
 }  // namespace
 
 int main(int argc, char** argv) {
-  const auto cfg = load_with_overrides(argc, argv);
+  auto cfg = load_with_overrides(argc, argv);
   if (!cfg) return 1;
-  spdlog::set_level(spdlog::level::from_str(cfg->log_level));
+
+  const auto lvl = parse_log_level(cfg->log_level);
+  if (!lvl) {
+    spdlog::error("log-level 非法 '{}'(应为 trace/debug/info/warn/error/critical/off)",
+                  cfg->log_level);
+    return 1;
+  }
+  spdlog::set_level(*lvl);
 
   const Kind kind = (cfg->input_kind == "book") ? Kind::Book : Kind::Trade;
+
+  // 文件输出无节奏意义:忽略 realtime,按尽快回放(避免原速写文件白等)。
+  if (cfg->output.format != "shm" && cfg->realtime > 0.0) {
+    spdlog::warn("文件输出忽略 realtime={},按尽快回放", cfg->realtime);
+    cfg->realtime = 0.0;
+  }
 
   auto out = open_output(*cfg, kind);
   if (!out) {
     spdlog::error("open output failed: {}", mdreplay::to_string(out.error()));
     return 1;
   }
-  spdlog::info("output: {} → {}", cfg->output.format,
-               cfg->output.format == "shm" ? cfg->output.shm : cfg->output.path);
+  if (cfg->output.format == "shm")
+    spdlog::info("output: shm → {} ({})", cfg->output.shm,
+                 cfg->output.create ? "created" : "attached");
+  else
+    spdlog::info("output: {} → {}", cfg->output.format, cfg->output.path);
 
   std::size_t skipped = 0;
   auto        sources = load_sources(*cfg, kind, skipped);
-  if (!sources) {
-    spdlog::error("load input failed: {}", mdreplay::to_string(sources.error()));
-    return 1;
-  }
-  if (sources->empty()) {
+  if (sources.empty()) {
     spdlog::error("no *.{}.{} under '{}'", cfg->input_kind, cfg->input_format, cfg->dir);
     return 1;
   }
-  spdlog::info("input: {} {} sources, realtime={}, window=[{}..{}]", sources->size(),
+  spdlog::info("input: {} {} sources, realtime={}, window=[{}..{}]", sources.size(),
                cfg->input_format, cfg->realtime, cfg->start_ns, cfg->end_ns);
 
-  replay(*cfg, std::move(*sources), *out->sink, skipped);
+  replay(*cfg, std::move(sources), *out->sink, skipped);
   return 0;
 }

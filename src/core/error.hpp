@@ -10,9 +10,11 @@
 namespace mdreplay {
 
 enum class Error {
-  ConfigParse,    // toml 解析失败
-  ConfigInvalid,  // 配置字段非法(realtime 越界 / format 未知 / scale 负)
+  ConfigNotFound, // 配置文件不存在
+  ConfigParse,    // toml 语法解析失败
+  ConfigInvalid,  // 配置字段非法(realtime 越界 / format 未知 / kind 非法)
   FileOpen,       // 输入文件打不开
+  OutputOpen,     // 输出文件打不开(csv/json sink)
   CsvParse,       // CSV 单行数值解析失败
   CsvSchema,      // CSV 表头缺必需列
   ShmOpen,        // shm_open / ftruncate / mmap 失败
@@ -26,9 +28,11 @@ using Result = std::expected<T, Error>;
 
 [[nodiscard]] constexpr std::string_view to_string(Error e) noexcept {
   switch (e) {
+    case Error::ConfigNotFound: return "config file not found";
     case Error::ConfigParse:   return "config parse error";
     case Error::ConfigInvalid: return "config invalid";
     case Error::FileOpen:      return "input file open failed";
+    case Error::OutputOpen:    return "output file open failed";
     case Error::CsvParse:      return "csv row parse error";
     case Error::CsvSchema:     return "csv header missing required column";
     case Error::ShmOpen:       return "shm open/mmap failed";

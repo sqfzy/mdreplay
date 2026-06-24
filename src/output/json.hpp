@@ -19,7 +19,7 @@ class JsonSink : public Sink {
 public:
   static Result<std::unique_ptr<JsonSink>> open(const std::string& path, Kind /*kind*/) {
     auto f = std::make_unique<std::ofstream>(path);
-    if (!*f) return std::unexpected(Error::FileOpen);
+    if (!*f) return std::unexpected(Error::OutputOpen);
     return std::unique_ptr<JsonSink>(new JsonSink(std::move(f)));
   }
 

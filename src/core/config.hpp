@@ -1,20 +1,20 @@
 #pragma once
 // config.hpp — 解析 config.toml → Config + 校验。toml++ 驱动;datetime 窗口转 epoch ns。
 //
-// 校验在启动期一次做完(realtime∈[0,1]、output.format∈{book,trade}、outputs 非空),
-// 任一不符 → ConfigInvalid 上抛 main 转非零退出(不带病进回放)。
+// 校验在启动期一次做完(realtime∈[0,1]、input.kind∈{book,trade}、output.format∈{shm,csv,json}
+// 且对应 shm/path 非空),任一不符 → ConfigInvalid 上抛 main 转非零退出(不带病进回放)。
 
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include <toml++/toml.hpp>
 
 #include "core/error.hpp"
-#include "core/merge.hpp"  // kNoStart / kNoEnd
+#include "core/window.hpp"  // kNoStart / kNoEnd
 
 namespace mdreplay {
 
@@ -22,7 +22,7 @@ struct OutputCfg {
   std::string format;  // "shm" | "csv" | "json" —— 去向
   std::string shm;     // format=shm 时的段名
   std::string path;    // format=csv|json 时的输出文件
-  bool        create;  // format=shm 时:建段 or attach
+  bool        create{true};  // format=shm 时:建段 or attach
 };
 
 struct Config {
@@ -41,14 +41,28 @@ struct Config {
 [[nodiscard]] inline std::optional<std::int64_t> parse_datetime_ns(const std::string& s,
                                                                    std::int64_t empty_sentinel) {
   if (s.empty()) return empty_sentinel;
-  std::tm tm{};
-  if (std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-                  &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+  int  y, mo, d, h, mi, se;
+  char extra;  // 第 7 个 %c 命中(n==7)= 有尾随字符 → 拒;n<6 = 不完整 → 拒
+  if (std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d%c", &y, &mo, &d, &h, &mi, &se, &extra) != 6)
     return std::nullopt;
-  tm.tm_year -= 1900;
-  tm.tm_mon -= 1;
+
+  std::tm tm{};
+  tm.tm_year = y - 1900;
+  tm.tm_mon  = mo - 1;
+  tm.tm_mday = d;
+  tm.tm_hour = h;
+  tm.tm_min  = mi;
+  tm.tm_sec  = se;
   const std::time_t secs = timegm(&tm);  // UTC,不受本地时区影响
   if (secs == static_cast<std::time_t>(-1)) return std::nullopt;
+
+  // 回写比对:timegm 把越界字段(如 2026-02-30)静默归一化;归一化后与输入不符即判非法。
+  std::tm chk{};
+  gmtime_r(&secs, &chk);
+  if (chk.tm_year != tm.tm_year || chk.tm_mon != tm.tm_mon || chk.tm_mday != tm.tm_mday ||
+      chk.tm_hour != tm.tm_hour || chk.tm_min != tm.tm_min || chk.tm_sec != tm.tm_sec)
+    return std::nullopt;
+
   return static_cast<std::int64_t>(secs) * 1'000'000'000LL;
 }
 
@@ -96,6 +110,8 @@ struct Config {
 
 // 读文件 → 解析 → 校验。文件/语法错误 → ConfigParse。
 [[nodiscard]] inline Result<Config> load_config(const std::string& path) {
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) return std::unexpected(Error::ConfigNotFound);
   try {
     return parse_config(toml::parse_file(path));
   } catch (const toml::parse_error&) {
