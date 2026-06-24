@@ -505,6 +505,37 @@ static void test_json_depth5() {
   fs::remove_all(dir);
 }
 
+// 边界:量 ×10^scale 越 u32 → ScaleOverflow 分类;5 档行中任一价非法 → BadNumber 分类(整行跳)。
+static void test_overflow_and_badvalue() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_ovf";
+  fs::create_directories(dir);
+  // trade qty=5e9 > u32(4.29e9),scale 0 仍越界 → ScaleOverflow
+  {
+    const std::string p = dir + "/o.trade.csv";
+    { std::ofstream o(p); o << "ts,symbol,side,px,qty\n1,SOLUSDT,0,68.84,5000000000\n"; }
+    SkipStats  sk;
+    const auto src = load_csv_source(p, Kind::Trade, sk);
+    CHECK(src.has_value() && (*src)->peek() == nullptr);
+    CHECK(sk.total() == 1 && sk.count(SkipReason::ScaleOverflow) == 1);
+  }
+  // 5 档行某档价非数字 → BadNumber(整行跳,不产部分档)
+  {
+    const std::string p = dir + "/b.book.csv";
+    { std::ofstream o(p);
+      o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty,bid_px_1,bid_qty_1,ask_px_1,ask_qty_1,"
+           "bid_px_2,bid_qty_2,ask_px_2,ask_qty_2,bid_px_3,bid_qty_3,ask_px_3,ask_qty_3,"
+           "bid_px_4,bid_qty_4,ask_px_4,ask_qty_4\n";
+      o << "1,SOLUSDT,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,9x,1,1,1\n"; }  // ask_px_4=9x 非法
+    SkipStats  sk;
+    const auto src = load_csv_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && (*src)->peek() == nullptr);
+    CHECK(sk.total() == 1 && sk.count(SkipReason::BadNumber) == 1);
+  }
+  fs::remove_all(dir);
+}
+
 int main() {
   test_fixed();
   test_clock();
@@ -517,6 +548,7 @@ int main() {
   test_book_depth5();
   test_depth_shm();
   test_json_depth5();
+  test_overflow_and_badvalue();
   if (g_fail == 0) std::printf("all tests passed\n");
   else std::printf("%d checks FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;
