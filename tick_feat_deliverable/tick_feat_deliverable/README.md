@@ -15,7 +15,7 @@
 - `diff_tick_feat.py` — diff 工具(你的输出 vs 参照)。
 
 ## 工作流(实盘开发者自验)
-1. **按下面"原始数据格式"存储原始行情**(OKX okex_swap + BN binance_swap,逐事件)。
+1. **按下面"原始数据格式"存储原始行情**(OKX okx_swap + BN binance_swap,逐事件)。
 2. 用参照算标准答案:
    ```
    python3 build_tick_feat_standalone.py --raw_dir <你的原始目录> --symbol ADAUSDT --date 20260512 --out ref.parquet
@@ -41,7 +41,7 @@ N_LVLS=15,共 64 列(0-indexed):
 | col34..48 | 卖价 L0-14 ×1e8 |
 | col49..63 | 卖量 L0-14 ×1e8 |
 - OB行: `col2==0`;成交行: `col2!=0`
-- 文件名 `okex_swap_{sym}_{YYYYMMDD}.parquet`(OKX)、`binance_swap_{sym}_{YYYYMMDD}.parquet`(BN)
+- 文件名 `okx_swap_{sym}_{YYYYMMDD}.parquet`(OKX)、`binance_swap_{sym}_{YYYYMMDD}.parquet`(BN)
 
 ## ⚠️ 必须复刻的口径(否则 diff≠0)
 1. 1s 桶:`ts_sec = ts // 1e6 * 1e6`。

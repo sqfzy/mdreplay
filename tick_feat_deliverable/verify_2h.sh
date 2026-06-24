@@ -19,8 +19,8 @@ uv run --no-project --with pyarrow python3 format_jsonl.py \
 echo "[2/3] C++ 批量算特征 → $MINE ..."
 mkdir -p "$MINE"
 n=0
-for f in "$FMT"/okex_swap_*_"$DATE".csv; do
-  sym=$(basename "$f" | sed -E "s/okex_swap_(.+)_${DATE}.csv/\1/")
+for f in "$FMT"/okx_swap_*_"$DATE".csv; do
+  sym=$(basename "$f" | sed -E "s/okx_swap_(.+)_${DATE}.csv/\1/")
   "$BIN" --raw_dir "$FMT" --symbol "$sym" --date "$DATE" --warmup_days 0 \
          --out "$MINE/$sym.csv" >/dev/null 2>&1 && n=$((n+1))
 done

@@ -23,7 +23,7 @@
    col49..63  = 卖量 L0..L14  ×1e8     (col49=卖1量)
  → OB行判定: col2==0 ; 成交行判定: col2!=0
  文件名: {venue}_{symbol}_{YYYYMMDD}.parquet
-   OKX(挂单所/主venue) = okex_swap_* ; BN(算基差) = binance_swap_*
+   OKX(挂单所/主venue) = okx_swap_* ; BN(算基差) = binance_swap_*
 
 ────────────────────────────────────────────────────────────────────
  ⚠️ 关键口径 (实盘必须逐位复刻, 否则 diff 不为 0)
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--date", required=True, help="目标日 YYYYMMDD")
     ap.add_argument("--warmup_days", type=int, default=2, help="加载前N天暖机(pm_12h需>=1, 建议2)")
-    ap.add_argument("--okx_prefix", default="okex_swap")
+    ap.add_argument("--okx_prefix", default="okx_swap")
     ap.add_argument("--bn_prefix", default="binance_swap")
     ap.add_argument("--out", default="tick_feat_ref.parquet")
     a = ap.parse_args()

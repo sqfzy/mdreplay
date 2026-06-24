@@ -9,7 +9,7 @@ build_tick_feat_standalone.py 期望的标准布局(列序两所严格一致):
   col34..48=ap0..14(×1e8)  col49..63=aa0..14(量)
 
 venue 差异(仅 build_rows_* 不同, schema/输出共享):
-  okx     : books 400档增量 → 本地重建订单簿; trades side=buy/sell; jsonl 前缀 okx_,     输出 okex_swap_
+  okx     : books 400档增量 → 本地重建订单簿; trades side=buy/sell; jsonl 前缀 okx_,     输出 okx_swap_
   binance : depth20 全量快照(b/a) 直取前15; trade m=isBuyerMaker; jsonl 前缀 binance_, 输出 binance_swap_
 
 用法:
@@ -34,7 +34,7 @@ N_LVLS  = 15
 PX_SCALE = 100_000_000          # 1e8
 
 VENUES = {                       # venue → (jsonl 前缀, 输出文件前缀)
-    "okx":     ("okx",     "okex_swap"),
+    "okx":     ("okx",     "okx_swap"),
     "binance": ("binance", "binance_swap"),
 }
 

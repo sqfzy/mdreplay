@@ -1,7 +1,7 @@
 // live_replay_main.cpp — 流式引擎 replay CLI
 //
 //   tick_feat_replay --raw_dir <DIR> --symbol SOLUSDT --date 20260623 --warmup_days 0
-//                    [--okx_prefix okex_swap] [--bn_prefix binance_swap] [--out mine_stream.csv] [--verify]
+//                    [--okx_prefix okx_swap] [--bn_prefix binance_swap] [--out mine_stream.csv] [--verify]
 //
 // 读 formatted 标准行(OKX+BN) → 当历史流喂 StreamingFeatureEngine → 写 f0-f9 csv。
 // --verify: 额外跑批处理 compute_day 同输入, 断言流式输出逐位相同(bit-identical)。
@@ -33,7 +33,7 @@ namespace {
 
 struct Args {
     std::string raw_dir, symbol, date;
-    std::string okx_prefix = "okex_swap";
+    std::string okx_prefix = "okx_swap";
     std::string bn_prefix  = "binance_swap";
     std::string out;
     int         warmup_days = 0;

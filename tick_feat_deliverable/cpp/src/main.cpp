@@ -1,7 +1,7 @@
 // main.cpp — tick_feat 离线批处理复刻 CLI(对应 build_tick_feat_standalone.py)
 //
 //   tick_feat --raw_dir <DIR> --symbol ADAUSDT --date 20260512 [--warmup_days 2] \
-//             [--okx_prefix okex_swap] [--bn_prefix binance_swap] [--out ref_cpp.parquet]
+//             [--okx_prefix okx_swap] [--bn_prefix binance_swap] [--out ref_cpp.parquet]
 //
 // 读 raw_dir 下 {prefix}_{symbol}_{YYYYMMDD}.parquet(含暖机前日)→ compute_day → 写 parquet。
 #include <cstdio>
@@ -28,7 +28,7 @@ namespace {
 
 struct Args {
     std::string raw_dir, symbol, date;
-    std::string okx_prefix = "okex_swap";
+    std::string okx_prefix = "okx_swap";
     std::string bn_prefix  = "binance_swap";
     std::string out;                                    // 空 → main 按 IO 类型补默认扩展名
     int         warmup_days = 2;

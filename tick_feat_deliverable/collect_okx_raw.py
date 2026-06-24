@@ -49,7 +49,7 @@ logger = logging.getLogger("collect_okx")
 
 
 def _inst_id(symbol: str) -> str:
-    """BTCUSDT -> BTC-USDT-SWAP (与 format_parquet_single 的 okex_swap 口径一致)。"""
+    """BTCUSDT -> BTC-USDT-SWAP (与 format_parquet_single 的 okx_swap 口径一致)。"""
     return symbol.replace("USDT", "-USDT-SWAP")
 
 

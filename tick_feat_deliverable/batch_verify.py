@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """批量对拍: 每个 symbol 用 python 黄金参照(OKX+BN)算 ref, 与 C++ 输出 CSV diff。
 
-ref = compute_day([okex_swap_*.parquet], [binance_swap_*.parquet], date)  # 有 BN 则算 f8/f9
+ref = compute_day([okx_swap_*.parquet], [binance_swap_*.parquet], date)  # 有 BN 则算 f8/f9
 mine = {mine_dir}/{symbol}.csv  (C++ tick_feat_csv 产出)
 """
 import argparse
@@ -42,9 +42,9 @@ def main() -> int:
     ap.add_argument("--date", default="20260623")
     a = ap.parse_args()
 
-    files = sorted(glob.glob(f"{a.formatted}/okex_swap_*_{a.date}.parquet"))
+    files = sorted(glob.glob(f"{a.formatted}/okx_swap_*_{a.date}.parquet"))
     if not files:
-        print(f"无 OKX parquet: {a.formatted}/okex_swap_*_{a.date}.parquet"); return 1
+        print(f"无 OKX parquet: {a.formatted}/okx_swap_*_{a.date}.parquet"); return 1
     print(f"{'symbol':12} {'ref行':>6} {'对齐':>6} {'BN':>3} {'max|diff|':>12} {'状态':>6}")
     all_ok = True
     worst_overall = 0.0

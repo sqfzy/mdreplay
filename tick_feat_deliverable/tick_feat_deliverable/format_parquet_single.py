@@ -3,7 +3,7 @@ format_parquet_single.py
 单交易所数据格式化: 将原始 orderbook + trades CSV 转为 C++ 回测引擎可读的 parquet 格式。
 每次只处理一个交易所，输出按 {exchange}_{symbol}_{date}.parquet 命名。
 
-exchange 命名规范: binance_swap, binance_spot, okex_swap, okex_spot, bybit_swap, bybit_spot
+exchange 命名规范: binance_swap, binance_spot, okx_swap, okx_spot, bybit_swap, bybit_spot
 
 用法示例:
     mconf = {
@@ -46,8 +46,8 @@ def max_decimal_length(column):
 EXCHANGE_SYMBOL_FORMAT = {
     "binance_swap": lambda s: s,                              # SOLUSDT
     "binance_spot": lambda s: s,                              # SOLUSDT
-    "okex_swap":    lambda s: s.replace("USDT", "-USDT-SWAP"),# SOL-USDT-SWAP
-    "okex_spot":    lambda s: s.replace("USDT", "-USDT"),     # SOL-USDT
+    "okx_swap":    lambda s: s.replace("USDT", "-USDT-SWAP"),# SOL-USDT-SWAP
+    "okx_spot":    lambda s: s.replace("USDT", "-USDT"),     # SOL-USDT
     "bybit_swap":   lambda s: s,                              # SOLUSDT
     "bybit_spot":   lambda s: s,                              # SOLUSDT
 }
