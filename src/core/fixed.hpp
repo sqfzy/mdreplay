@@ -39,7 +39,9 @@ inline constexpr std::uint32_t kU32Max = 4294967295u;
   std::uint64_t m = 0;
   const auto push = [&](char c) -> bool {
     if (c < '0' || c > '9') return false;
-    m = m * 10 + static_cast<std::uint64_t>(c - '0');
+    // 一旦超过 u32 上限就停止累加(值只会更大、永不可能 fit;停在 >kU32Max 的标记上即可):
+    // 既让 encode_group 据此降 scale / 判 ScaleOverflow,又杜绝 ≥20 位整数部分的 uint64 回绕静默产错值。
+    if (m <= kU32Max) m = m * 10 + static_cast<std::uint64_t>(c - '0');
     return true;
   };
   for (const char c : int_part)
