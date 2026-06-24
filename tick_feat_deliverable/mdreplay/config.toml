@@ -20,13 +20,8 @@ format = "trade"            # 输出流/编码器:trade(→ gconf v2 BcastRing)
 shm    = "/shm_bybit_lin_trade_v2"
 create = true
 
-[scale]
-default_price = 2
-default_qty   = 3
-# 按 symbol 覆盖(高价/小数位多的币):
-# [scale.SOLUSDT]
-#   price = 2
-#   qty   = 2
+# 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale,
+#     逐记录写进 shm(见 src/fixed.hpp)。
 
 [log]
 level        = "info"       # trace | debug | info | warn | error

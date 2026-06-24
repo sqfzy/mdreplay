@@ -9,8 +9,6 @@
 #include <ctime>
 #include <optional>
 #include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include <toml++/toml.hpp>
@@ -26,18 +24,6 @@ struct OutputCfg {
   bool        create;  // 建段 or attach
 };
 
-struct ScaleCfg {
-  std::uint8_t default_price{2};
-  std::uint8_t default_qty{3};
-  // symbol 名 → (price_scale, qty_scale) 覆盖
-  std::unordered_map<std::string, std::pair<std::uint8_t, std::uint8_t>> overrides;
-
-  [[nodiscard]] std::pair<std::uint8_t, std::uint8_t> for_symbol(const std::string& sym) const {
-    if (const auto it = overrides.find(sym); it != overrides.end()) return it->second;
-    return {default_price, default_qty};
-  }
-};
-
 struct Config {
   std::string            input_format{"csv"};
   std::string            dir;
@@ -45,7 +31,6 @@ struct Config {
   std::int64_t           start_ns{kNoStart};
   std::int64_t           end_ns{kNoEnd};
   std::vector<OutputCfg> outputs;
-  ScaleCfg               scale;
   std::string            log_level{"info"};
   int                    progress_sec{5};
 };
@@ -89,19 +74,6 @@ struct Config {
           (*t)["shm"].value_or<std::string>(""),
           (*t)["create"].value_or(true),
       });
-    }
-  }
-
-  if (const auto* sc = tbl["scale"].as_table()) {
-    cfg.scale.default_price = static_cast<std::uint8_t>((*sc)["default_price"].value_or(2));
-    cfg.scale.default_qty   = static_cast<std::uint8_t>((*sc)["default_qty"].value_or(3));
-    for (const auto& [key, val] : *sc) {
-      const auto* ov = val.as_table();
-      if (!ov) continue;  // default_price/default_qty 是标量,跳过
-      cfg.scale.overrides[std::string(key.str())] = {
-          static_cast<std::uint8_t>((*ov)["price"].value_or(cfg.scale.default_price)),
-          static_cast<std::uint8_t>((*ov)["qty"].value_or(cfg.scale.default_qty)),
-      };
     }
   }
 
