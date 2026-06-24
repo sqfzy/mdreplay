@@ -27,7 +27,7 @@ namespace mdreplay {
   std::vector<Record> rows;
   std::string         line;
   while (std::getline(f, line)) {
-    if (!line.empty() && line.back() == '\r') line.pop_back();
+    chomp_cr(line);
     if (line.empty()) continue;
 
     const auto j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);

@@ -19,7 +19,7 @@ class CsvSink : public Sink {
 public:
   static Result<std::unique_ptr<CsvSink>> open(const std::string& path, Kind kind) {
     auto f = std::make_unique<std::ofstream>(path);
-    if (!*f) return std::unexpected(Error::FileOpen);
+    if (!*f) return std::unexpected(Error::OutputOpen);
     *f << (kind == Kind::Book ? "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n" : "ts,symbol,side,px,qty\n");
     return std::unique_ptr<CsvSink>(new CsvSink(std::move(f)));
   }

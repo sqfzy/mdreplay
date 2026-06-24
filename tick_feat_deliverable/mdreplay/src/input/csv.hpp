@@ -22,9 +22,11 @@
 namespace mdreplay {
 namespace detail {
 
-// 去掉行尾 '\r'(健壮吃 CRLF 输入,如 Python csv.writer 的 \r\n)。
-inline void chomp_cr(std::string& s) {
-  if (!s.empty() && s.back() == '\r') s.pop_back();
+// 去掉前后空白(列名容错:"ts, symbol" 这类手写表头也能匹配)。
+[[nodiscard]] inline std::string_view trim(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+  return s;
 }
 
 inline void split_csv(std::string_view line, std::vector<std::string_view>& out) {
@@ -55,12 +57,12 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
 
   std::string header;
   if (!std::getline(f, header)) return std::unexpected(Error::CsvSchema);
-  detail::chomp_cr(header);
+  chomp_cr(header);
 
   std::vector<std::string_view> hcols;
   detail::split_csv(header, hcols);
   std::unordered_map<std::string_view, std::size_t> idx;
-  for (std::size_t i = 0; i < hcols.size(); ++i) idx.emplace(hcols[i], i);
+  for (std::size_t i = 0; i < hcols.size(); ++i) idx.emplace(detail::trim(hcols[i]), i);
 
   const auto col = [&](std::string_view name) -> std::optional<std::size_t> {
     const auto it = idx.find(name);
@@ -81,22 +83,22 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
 
   std::vector<Record>           rows;
   std::string                   line;
-  std::vector<std::string_view> f_;
+  std::vector<std::string_view> fields;
   while (std::getline(f, line)) {
-    detail::chomp_cr(line);
+    chomp_cr(line);
     if (line.empty()) continue;
-    detail::split_csv(line, f_);
-    if (f_.size() != hcols.size()) { ++skipped; continue; }  // 字段数不符 → 跳
+    detail::split_csv(line, fields);
+    if (fields.size() != hcols.size()) { ++skipped; continue; }  // 字段数不符 → 跳
 
-    const auto ts = detail::to_i64(f_[*c_ts]);
+    const auto ts = detail::to_i64(fields[*c_ts]);
     if (!ts) { ++skipped; continue; }
 
     std::optional<Record> rec;
     if (kind == Kind::Book) {
-      rec = make_book_record(*ts, f_[*c_sym], f_[*c_bpx], f_[*c_bqty], f_[*c_apx], f_[*c_aqty]);
+      rec = make_book_record(*ts, fields[*c_sym], fields[*c_bpx], fields[*c_bqty], fields[*c_apx], fields[*c_aqty]);
     } else {
-      const auto side = detail::to_i64(f_[*c_side]);
-      if (side) rec = make_trade_record(*ts, f_[*c_sym], *side, f_[*c_px], f_[*c_qty]);
+      const auto side = detail::to_i64(fields[*c_side]);
+      if (side) rec = make_trade_record(*ts, fields[*c_sym], *side, fields[*c_px], fields[*c_qty]);
     }
     if (!rec) { ++skipped; continue; }
     rows.push_back(*rec);

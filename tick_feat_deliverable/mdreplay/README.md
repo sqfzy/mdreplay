@@ -87,7 +87,7 @@ python3 ../formatted_to_datas.py --out datas
 ## 注意
 
 - **可复现**:`realtime=0` 下,产出(shm 段 / 文件)逐字节确定——归并序固定、`exch_ns` 取数据、
-  段头 `created_ns=0`。同一输入跑两遍逐字节一致。精度往返无损(csv↔json↔shm 经定点精确还原)。
+  段头 `created_ns=0`。同一输入跑两遍逐字节一致。csv↔json↔shm 经定点往返**数值无损**(尾随零归一,如 68.80→68.8)。
 - **广播环不背压**:`shm` 的 trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量
   会绕圈覆盖(消费者只能拿到最近一圈)。要让消费者无损跟上,用 `realtime=1.0` 真盘节奏。
 - 段头自校验:attach 既有段时比对 magic/version/entry_size/capacity/schema_hash,不符拒启动。

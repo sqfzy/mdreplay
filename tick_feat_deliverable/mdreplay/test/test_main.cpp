@@ -20,7 +20,10 @@
 #include "core/merge.hpp"
 #include "core/record.hpp"
 #include "input/csv.hpp"
+#include "input/json.hpp"
 #include "input/source.hpp"
+#include "output/csv.hpp"
+#include "output/json.hpp"
 #include "output/shm.hpp"
 
 static int g_fail = 0;
@@ -252,12 +255,63 @@ static void test_e2e() {
   }
 }
 
+static void test_file_io() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_io";
+  fs::create_directories(dir);
+
+  Record b;
+  b.kind = Kind::Book; b.ts_ns = 1000; b.gid = 21; b.price_scale = 2; b.qty_scale = 2;
+  b.bid_px = 6884; b.bid_qty = 190667; b.ask_px = 6885; b.ask_qty = 126072;
+  Record t;
+  t.kind = Kind::Trade; t.ts_ns = 2000; t.gid = 21; t.side = 1; t.price_scale = 2; t.qty_scale = 2;
+  t.px = 6884; t.qty = 2902;
+
+  // CSV 文件输出 → 读回(book)。sink 作用域结束即 flush+close,再读回。
+  {
+    const std::string p = dir + "/x.csv";
+    { const auto sink = CsvSink::open(p, Kind::Book);
+      CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
+    std::size_t sk = 0;
+    const auto  src = load_csv_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2);
+    CHECK(r && r->bid_px == 6884 && r->ask_px == 6885 && r->bid_qty == 190667 && r->ask_qty == 126072);
+  }
+  // JSON 文件输出 → 读回(book)
+  {
+    const std::string p = dir + "/x.book.json";
+    { const auto sink = JsonSink::open(p, Kind::Book);
+      CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
+    std::size_t sk = 0;
+    const auto  src = load_json_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->bid_px == 6884 && r->ask_px == 6885);
+  }
+  // JSON 文件输出 → 读回(trade)
+  {
+    const std::string p = dir + "/x.trade.json";
+    { const auto sink = JsonSink::open(p, Kind::Trade);
+      CHECK(sink.has_value() && (*sink)->write(t).has_value()); }
+    std::size_t sk = 0;
+    const auto  src = load_json_source(p, Kind::Trade, sk);
+    CHECK(src.has_value() && sk == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->ts_ns == 2000 && r->gid == 21 && r->side == 1 && r->px == 6884 && r->qty == 2902);
+  }
+  fs::remove_all(dir);
+}
+
 int main() {
   test_fixed();
   test_clock();
   test_merge();
   test_config();
   test_e2e();
+  test_file_io();
   if (g_fail == 0) std::printf("all tests passed\n");
   else std::printf("%d checks FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;
