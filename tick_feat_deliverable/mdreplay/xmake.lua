@@ -9,15 +9,16 @@ add_includedirs("gconf/include", "src")
 
 add_requires("spdlog", {system = true})  -- 系统 pkg-config(同 cpp 工程约定)
 add_requires("toml++")                    -- header-only,xmake 包管理拉取
+add_requires("nlohmann_json")             -- header-only,json 输入/输出
 
 target("mdreplay")
     set_kind("binary")
     add_files("src/main.cpp")
-    add_packages("spdlog", "toml++")
+    add_packages("spdlog", "toml++", "nlohmann_json")
 
--- 单元测试:scale / clock / merge / config(纯逻辑,不碰 shm)
+-- 单元测试:fixed / clock / merge / config / e2e
 target("test")
     set_kind("binary")
     set_default(false)
     add_files("test/test_main.cpp")
-    add_packages("spdlog", "toml++")
+    add_packages("spdlog", "toml++", "nlohmann_json")

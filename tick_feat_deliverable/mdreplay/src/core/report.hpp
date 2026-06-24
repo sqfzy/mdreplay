@@ -6,7 +6,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "record.hpp"
+#include "core/record.hpp"
 
 namespace mdreplay {
 

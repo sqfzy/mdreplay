@@ -14,14 +14,14 @@
 #include <gconf/shm/v2/board.h>
 #include <gconf/shm/v2/trade.h>
 
-#include "clock.hpp"
-#include "config.hpp"
-#include "fixed.hpp"
-#include "input/csv_source.hpp"
-#include "merge.hpp"
-#include "output/book_sink.hpp"
-#include "output/trade_sink.hpp"
-#include "record.hpp"
+#include "core/clock.hpp"
+#include "core/config.hpp"
+#include "core/fixed.hpp"
+#include "core/merge.hpp"
+#include "core/record.hpp"
+#include "input/csv.hpp"
+#include "input/source.hpp"
+#include "output/shm.hpp"
 
 static int g_fail = 0;
 #define CHECK(cond)                                                              \
@@ -154,46 +154,47 @@ static void test_merge() {
 
 static void test_config() {
   using namespace mdreplay;
-  // happy:realtime / dir / outputs 解析
+  // happy:input.kind / realtime / dir / output 解析
   {
     const auto c = parse_config(toml::parse(R"(
       [input]
       dir = "d"
+      kind = "trade"
       [replay]
       realtime = 0.5
       [output]
-      format = "book"
+      format = "shm"
       shm = "/s"
-      create = true
     )"));
     CHECK(c.has_value());
     CHECK(c->realtime == 0.5);
-    CHECK(c->dir == "d");
-    CHECK(c->output.format == "book" && c->output.shm == "/s");
+    CHECK(c->dir == "d" && c->input_kind == "trade");
+    CHECK(c->output.format == "shm" && c->output.shm == "/s");
     CHECK(c->start_ns == kNoStart && c->end_ns == kNoEnd);  // 空窗口 → 无界
   }
-  // 坏 realtime(>1)→ ConfigInvalid
-  CHECK(!parse_config(toml::parse(
-            "[replay]\nrealtime=2.0\n[output]\nformat=\"book\"\nshm=\"/s\"")).has_value());
-  // 未知 format → ConfigInvalid
-  CHECK(!parse_config(toml::parse("[output]\nformat=\"xxx\"\nshm=\"/s\"")).has_value());
-  // 空 outputs → ConfigInvalid
-  CHECK(!parse_config(toml::parse("[input]\ndir=\"d\"")).has_value());
-  // datetime 窗口 → 整秒 ns(不硬编码具体 epoch,验证落到 ns 量级)
+  // 文件输出 csv:需 path
+  {
+    const auto c = parse_config(toml::parse("[output]\nformat=\"csv\"\npath=\"out.csv\""));
+    CHECK(c.has_value() && c->output.format == "csv" && c->output.path == "out.csv");
+  }
+  CHECK(!parse_config(toml::parse("[replay]\nrealtime=2.0\n[output]\nformat=\"shm\"\nshm=\"/s\"")).has_value());  // 坏 realtime
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"xxx\"\nshm=\"/s\"")).has_value());        // 未知 output.format
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"csv\"")).has_value());                    // csv 缺 path
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"shm\"\nshm=\"/s\"\n[input]\nkind=\"xxx\"")).has_value());  // 坏 kind
+  CHECK(!parse_config(toml::parse("[input]\ndir=\"d\"")).has_value());                          // 无 output
+  // datetime 窗口 → 整秒 ns
   {
     const auto c = parse_config(toml::parse(R"(
       [replay]
       start = "2026-06-23 00:00:00"
       [output]
-      format = "trade"
+      format = "shm"
       shm = "/s"
     )"));
     CHECK(c.has_value());
-    CHECK(c->start_ns != kNoStart && c->start_ns > 0);
-    CHECK(c->start_ns % 1'000'000'000LL == 0);  // 整秒 → ns
+    CHECK(c->start_ns != kNoStart && c->start_ns > 0 && c->start_ns % 1'000'000'000LL == 0);
   }
-  // 坏 datetime → ConfigInvalid
-  CHECK(!parse_config(toml::parse("[replay]\nstart=\"not-a-date\"\n[output]\nformat=\"book\"\nshm=\"/s\"")).has_value());
+  CHECK(!parse_config(toml::parse("[replay]\nstart=\"bad\"\n[output]\nformat=\"shm\"\nshm=\"/s\"")).has_value());  // 坏 datetime
 }
 
 static void test_e2e() {
