@@ -1,23 +1,23 @@
-# mdreplay —— 录制行情回放(多币多所混合)→ gconf v2 shm
+# mdreplay —— 单入单出记录回放(任意格式 → shm/csv/json)
 
 [input]
-format = "csv"              # csv | json(csv 先实现):决定文件解析器
-dir    = "datas"            # 录制根目录;扫该目录全部 *.book.csv / *.trade.csv(表头驱动)
+format = "csv"             # csv | json —— 输入文件格式
+dir    = "datas"           # 输入目录;扫 *.<kind>.<format>(如 *.book.csv)
+kind   = "book"            # book | trade —— 一次只回放一种;要两者跑两遍
 
 [replay]
-realtime = 1.0              # 0~1:值=有多实时。实际延迟 = 真实事件间隔 × realtime
-                            #   1 = 完全原速(默认);0.5 = 2× 实时;0 = 尽快(纯逻辑序、完全可复现)
-start = ""                  # 回放时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
-end   = ""                  # 回放时间窗止(留空=最晚),闭区间
+realtime = 1.0             # 0~1:值=有多实时。1=原速(默认);0.5=2× 实时;0=尽快(可复现)
+start = ""                 # 时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
+end   = ""                 # 时间窗止(留空=最晚),闭区间
 
-[output]                    # 单入单出:一次只回放一种。要 book 和 trade 都喂,跑两遍。
-format = "book"             # book | trade —— 决定读 *.<format>.csv + 写哪种段
-shm    = "/shm_bybit_lin_book_v2"
-create = true               # 生产者建段;false=attach 既有
+[output]
+format = "shm"             # shm | csv | json —— 去向
+shm    = "/shm_bybit_lin_book_v2"   # format=shm 时:段名
+path   = "out.book.csv"             # format=csv|json 时:输出文件
+create = true                       # format=shm 时:建段(O_TRUNC 幂等)/ false=attach
 
-# 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale,
-#     逐记录写进 shm(见 src/fixed.hpp)。
+# 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale。
 
 [log]
-level        = "info"       # trace | debug | info | warn | error
-progress_sec = 5            # 每 N 秒打一次进度(已发条数 / 当前 ts / lapped 计数)
+level        = "info"      # trace | debug | info | warn | error
+progress_sec = 5

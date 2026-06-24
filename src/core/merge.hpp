@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "input/source.hpp"
-#include "record.hpp"
+#include "core/record.hpp"
 
 namespace mdreplay {
 

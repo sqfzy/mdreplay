@@ -1,9 +1,11 @@
 #pragma once
-// shm_segment.hpp — POSIX shm 段的 RAII 封装:shm_open + ftruncate + mmap,建段写头 / 连段自校验。
+// shm.hpp — 输出去向之一:gconf v2 共享内存段。
+//   ShmSegment  POSIX shm_open/ftruncate/mmap 的 RAII 封装 + 建段写头 / 连段自校验。
+//   BookSink    Book Record → Board.slot[gid].write(BBO, latest-wins;单写直接写)。
+//   TradeSink   Trade Record → TradeRing.publish(无损广播,fetch_add + seqlock)。
 //
-// create=true:O_TRUNC 清零重建(幂等、可复现)→ seg_init 写段头(zeroed 内存即各段的初始态)。
-// create=false:attach 既有段 → seg_check;BadMagic/BadVersion/AbiMismatch → SegMismatch,
-//              SchemaDrift 可容忍(字段尺寸都对、仅描述串哈希不同)。
+// create=true:O_TRUNC 清零重建(幂等可复现)→ seg_init 写段头(zeroed 内存即各段初始态)。
+// create=false:attach → seg_check;BadMagic/BadVersion/AbiMismatch → SegMismatch,SchemaDrift 容忍。
 
 #include <cstddef>
 #include <cstdint>
@@ -14,9 +16,13 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <gconf/shm/v2/board.h>
 #include <gconf/shm/v2/seg_header.h>
+#include <gconf/shm/v2/trade.h>
 
-#include "error.hpp"
+#include "core/error.hpp"
+#include "core/record.hpp"
+#include "output/sink.hpp"
 
 namespace mdreplay {
 
@@ -74,8 +80,8 @@ private:
   void close_() noexcept {
     if (base_) ::munmap(base_, bytes_);
     if (fd_ >= 0) ::close(fd_);
-    base_ = nullptr;
-    fd_   = -1;
+    base_  = nullptr;
+    fd_    = -1;
     bytes_ = 0;
   }
   void swap(ShmSegment& o) noexcept {
@@ -87,6 +93,40 @@ private:
   void*       base_{nullptr};
   std::size_t bytes_{0};
   int         fd_{-1};
+};
+
+class BookSink : public Sink {
+public:
+  explicit BookSink(gconf::shm::v2::Board* board) : board_(board) {}
+  Result<void> write(const Record& r) override {
+    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns),  // update_id = ts(单调)
+                              r.bid_px, r.bid_qty, r.ask_px, r.ask_qty, 0, 0, 0,  // 延迟:回放无
+                              r.gid, r.price_scale, r.qty_scale, 0 /*path_idx*/);
+    return {};
+  }
+
+private:
+  gconf::shm::v2::Board* board_;
+};
+
+class TradeSink : public Sink {
+public:
+  explicit TradeSink(gconf::shm::v2::TradeRing* ring) : ring_(ring) {}
+  Result<void> write(const Record& r) override {
+    gconf::shm::v2::TradePayload p;
+    p.exch_ns          = r.ts_ns;
+    p.px               = r.px;
+    p.qty              = r.qty;
+    p.global_symbol_id = r.gid;
+    p.side             = r.side;
+    p.price_scale      = r.price_scale;
+    p.qty_scale        = r.qty_scale;
+    ring_->publish(p);
+    return {};
+  }
+
+private:
+  gconf::shm::v2::TradeRing* ring_;
 };
 
 }  // namespace mdreplay

@@ -9,9 +9,10 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
-#include "error.hpp"
+#include "core/error.hpp"
 
 namespace mdreplay {
 
@@ -65,6 +66,15 @@ inline constexpr std::uint32_t kU32Max = 4294967295u;
     if (fits) return static_cast<std::uint8_t>(scale);
   }
   return std::unexpected(Error::ScaleOverflow);            // 整数部分都越界(不可能的高价)
+}
+
+// 定点 → 十进制字符串(编码的逆;mantissa=6884,scale=2 → "68.84")。供 csv/json 输出还原精度。
+[[nodiscard]] inline std::string to_decimal(std::uint32_t mantissa, std::uint8_t scale) {
+  std::string s = std::to_string(mantissa);
+  if (scale == 0) return s;
+  if (s.size() <= scale) s.insert(0, scale - s.size() + 1, '0');  // 补前导零保证有整数位
+  s.insert(s.size() - scale, ".");
+  return s;
 }
 
 }  // namespace mdreplay

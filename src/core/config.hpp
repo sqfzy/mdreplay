@@ -13,24 +13,26 @@
 
 #include <toml++/toml.hpp>
 
-#include "error.hpp"
-#include "merge.hpp"  // kNoStart / kNoEnd
+#include "core/error.hpp"
+#include "core/merge.hpp"  // kNoStart / kNoEnd
 
 namespace mdreplay {
 
 struct OutputCfg {
-  std::string format;  // "book" | "trade"
-  std::string shm;     // 段名
-  bool        create;  // 建段 or attach
+  std::string format;  // "shm" | "csv" | "json" —— 去向
+  std::string shm;     // format=shm 时的段名
+  std::string path;    // format=csv|json 时的输出文件
+  bool        create;  // format=shm 时:建段 or attach
 };
 
 struct Config {
-  std::string  input_format{"csv"};
+  std::string  input_format{"csv"};  // csv | json —— 输入文件格式
   std::string  dir;
+  std::string  input_kind{"book"};   // book | trade —— 记录类型(单入单出,一次一种)
   double       realtime{1.0};
   std::int64_t start_ns{kNoStart};
   std::int64_t end_ns{kNoEnd};
-  OutputCfg    output;  // 单入单出:一次只回放一种(book 或 trade)
+  OutputCfg    output;
   std::string  log_level{"info"};
   int          progress_sec{5};
 };
@@ -55,6 +57,7 @@ struct Config {
   Config cfg;
   cfg.input_format = tbl["input"]["format"].value_or<std::string>("csv");
   cfg.dir          = tbl["input"]["dir"].value_or<std::string>("");
+  cfg.input_kind   = tbl["input"]["kind"].value_or<std::string>("book");
   cfg.realtime     = tbl["replay"]["realtime"].value_or(1.0);
   cfg.log_level    = tbl["log"]["level"].value_or<std::string>("info");
   cfg.progress_sec = tbl["log"]["progress_sec"].value_or(5);
@@ -69,6 +72,7 @@ struct Config {
     cfg.output = OutputCfg{
         (*t)["format"].value_or<std::string>(""),
         (*t)["shm"].value_or<std::string>(""),
+        (*t)["path"].value_or<std::string>(""),
         (*t)["create"].value_or(true),
     };
   }
@@ -76,8 +80,16 @@ struct Config {
   // 校验
   if (cfg.realtime < 0.0 || cfg.realtime > 1.0) return std::unexpected(Error::ConfigInvalid);
   if (cfg.start_ns > cfg.end_ns) return std::unexpected(Error::ConfigInvalid);
-  if ((cfg.output.format != "book" && cfg.output.format != "trade") || cfg.output.shm.empty())
+  if (cfg.input_kind != "book" && cfg.input_kind != "trade")
     return std::unexpected(Error::ConfigInvalid);
+  const auto& o = cfg.output;
+  if (o.format == "shm") {
+    if (o.shm.empty()) return std::unexpected(Error::ConfigInvalid);
+  } else if (o.format == "csv" || o.format == "json") {
+    if (o.path.empty()) return std::unexpected(Error::ConfigInvalid);
+  } else {
+    return std::unexpected(Error::ConfigInvalid);  // 未知 output.format
+  }
 
   return cfg;
 }

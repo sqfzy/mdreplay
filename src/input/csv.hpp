@@ -1,8 +1,7 @@
 #pragma once
-// csv_source.hpp — 表头驱动 CSV → 有序 Record 源。批量载入(回放数据全在手,k 路归并需同时 peek)。
+// csv.hpp — 表头驱动 CSV → 有序 Record 源。批量载入(回放数据全在手,k 路归并需同时 peek)。
 //
-// 列按名取(不靠列位魔法);symbol→gid 用 gconf;价/量经 fixed.hpp 编码成定点(精度沿用数据)。
-// 坏行 / 未知符号 / 字段数不符 → 计数跳过,不中断。book 与 trade 走同一加载器,kind 决定取哪些列。
+// 列按名取(不靠列位魔法);记录构建复用 record_build.hpp。坏行 / 未知符号 / 字段数不符 → 计数跳过。
 
 #include <charconv>
 #include <cstddef>
@@ -15,26 +14,12 @@
 #include <unordered_map>
 #include <vector>
 
-#include "error.hpp"
-#include "fixed.hpp"
-#include "gid.hpp"
+#include "core/error.hpp"
+#include "core/record.hpp"
+#include "input/record_build.hpp"
 #include "input/source.hpp"
-#include "record.hpp"
 
 namespace mdreplay {
-
-// 已载入内存的有序 Record 源。
-class LoadedSource : public Source {
-public:
-  explicit LoadedSource(std::vector<Record> rows) : rows_(std::move(rows)) {}
-  [[nodiscard]] const Record* peek() override { return i_ < rows_.size() ? &rows_[i_] : nullptr; }
-  void                        advance() override { ++i_; }
-
-private:
-  std::vector<Record> rows_;
-  std::size_t         i_ = 0;
-};
-
 namespace detail {
 
 // 去掉行尾 '\r'(健壮吃 CRLF 输入,如 Python csv.writer 的 \r\n)。
@@ -62,7 +47,7 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
 
 }  // namespace detail
 
-// 表头驱动加载一个文件 → Source。skipped 累加跳过的坏/未知行。文件/表头错误 → 上抛。
+// 表头驱动加载一个 CSV 文件 → Source。skipped 累加跳过的坏/未知行。文件/表头错误 → 上抛。
 [[nodiscard]] inline Result<std::unique_ptr<Source>> load_csv_source(const std::string& path,
                                                                      Kind kind, std::size_t& skipped) {
   std::ifstream f(path);
@@ -96,42 +81,25 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& out)
 
   std::vector<Record>           rows;
   std::string                   line;
-  std::vector<std::string_view> fields;
+  std::vector<std::string_view> f_;
   while (std::getline(f, line)) {
     detail::chomp_cr(line);
     if (line.empty()) continue;
-    detail::split_csv(line, fields);
-    if (fields.size() != hcols.size()) { ++skipped; continue; }  // 字段数不符 → 跳
+    detail::split_csv(line, f_);
+    if (f_.size() != hcols.size()) { ++skipped; continue; }  // 字段数不符 → 跳
 
-    const auto ts  = detail::to_i64(fields[*c_ts]);
-    const auto gid = gid_of(fields[*c_sym]);
-    if (!ts || !gid) { ++skipped; continue; }
+    const auto ts = detail::to_i64(f_[*c_ts]);
+    if (!ts) { ++skipped; continue; }
 
-    Record r;
-    r.kind  = kind;
-    r.ts_ns = *ts;
-    r.gid   = *gid;
-
+    std::optional<Record> rec;
     if (kind == Kind::Book) {
-      std::uint32_t           pv[2], qv[2];
-      const std::string_view  ps[2] = {fields[*c_bpx], fields[*c_apx]};
-      const std::string_view  qs[2] = {fields[*c_bqty], fields[*c_aqty]};
-      const auto psc = encode_group(ps, pv);
-      const auto qsc = encode_group(qs, qv);
-      if (!psc || !qsc) { ++skipped; continue; }
-      r.price_scale = *psc; r.qty_scale = *qsc;
-      r.bid_px = pv[0]; r.ask_px = pv[1]; r.bid_qty = qv[0]; r.ask_qty = qv[1];
+      rec = make_book_record(*ts, f_[*c_sym], f_[*c_bpx], f_[*c_bqty], f_[*c_apx], f_[*c_aqty]);
     } else {
-      const auto side = detail::to_i64(fields[*c_side]);
-      std::uint32_t          pv[1], qv[1];
-      const std::string_view ps[1] = {fields[*c_px]}, qs[1] = {fields[*c_qty]};
-      const auto psc = encode_group(ps, pv);
-      const auto qsc = encode_group(qs, qv);
-      if (!side || (*side != 0 && *side != 1) || !psc || !qsc) { ++skipped; continue; }
-      r.side = static_cast<std::uint8_t>(*side);
-      r.price_scale = *psc; r.qty_scale = *qsc; r.px = pv[0]; r.qty = qv[0];
+      const auto side = detail::to_i64(f_[*c_side]);
+      if (side) rec = make_trade_record(*ts, f_[*c_sym], *side, f_[*c_px], f_[*c_qty]);
     }
-    rows.push_back(r);
+    if (!rec) { ++skipped; continue; }
+    rows.push_back(*rec);
   }
 
   return std::unique_ptr<Source>{std::make_unique<LoadedSource>(std::move(rows))};
