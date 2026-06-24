@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -23,6 +24,15 @@ namespace mdreplay {
 // fixed.hpp 的编码错误 → 跳过原因:scale 越界单列,其余归数值非法。
 [[nodiscard]] inline SkipReason skip_of(Error e) noexcept {
   return e == Error::ScaleOverflow ? SkipReason::ScaleOverflow : SkipReason::BadNumber;
+}
+
+// book 档数判定(唯一真相源,csv 表头与 json 每行键共用):只接受 1 或 5,残缺/>5 → nullopt。
+// marker(k) 报第 k 档是否存在(k∈1..5)。无 _1.. → 1 档;_1.._4 齐且无 _5 → 5 档;其余拒。
+template <class MarkerFn>
+[[nodiscard]] inline std::optional<std::size_t> book_depth_of(MarkerFn marker) {
+  if (!marker(1) && !marker(2) && !marker(3) && !marker(4) && !marker(5)) return std::size_t{1};
+  if (marker(1) && marker(2) && marker(3) && marker(4) && !marker(5)) return std::size_t{5};
+  return std::nullopt;  // 残缺档 或 >5 档
 }
 
 // 多档 book:每个 span 含 depth 档(0=最优)。全档价共用 price_scale、全档量共用 qty_scale

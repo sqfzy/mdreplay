@@ -66,11 +66,10 @@ template <class HasFn>
 [[nodiscard]] inline Result<BookColumns> resolve_book_columns(HasFn has) {
   if (!has("bid_px") || !has("bid_qty") || !has("ask_px") || !has("ask_qty"))
     return std::unexpected(Error::CsvSchema);
-  const auto marker = [&](std::size_t k) { return has("bid_px_" + std::to_string(k)); };
+  const auto depth = book_depth_of([&](std::size_t k) { return has("bid_px_" + std::to_string(k)); });
+  if (!depth) return std::unexpected(Error::CsvSchema);  // 残缺档 或 >5 档
   BookColumns cols;
-  if (!marker(1) && !marker(2) && !marker(3) && !marker(4) && !marker(5)) cols.depth = 1;
-  else if (marker(1) && marker(2) && marker(3) && marker(4) && !marker(5)) cols.depth = 5;
-  else return std::unexpected(Error::CsvSchema);  // 残缺档 或 >5 档
+  cols.depth = *depth;
   for (std::size_t k = 0; k < cols.depth; ++k) {
     const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
     if (!has("bid_px" + s) || !has("bid_qty" + s) || !has("ask_px" + s) || !has("ask_qty" + s))

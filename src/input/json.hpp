@@ -49,12 +49,10 @@ namespace mdreplay {
       const auto ts = j.at("ts").get<std::int64_t>();
       sym           = j.at("symbol").get<std::string>();
       if (kind == Kind::Book) {
-        // 自动识别档数,只接受 1 或 5:无 _1.. 键 → 1;_1.._4 齐且无 _5 → 5;其它 → BadField 跳过。
-        const auto m = [&](std::size_t k) { return j.contains("bid_px_" + std::to_string(k)); };
-        std::size_t depth = 0;
-        if (!m(1) && !m(2) && !m(3) && !m(4) && !m(5)) depth = 1;
-        else if (m(1) && m(2) && m(3) && m(4) && !m(5)) depth = 5;
-        else { skips.add(SkipReason::BadField); continue; }  // 残缺/>5 档
+        // 自动识别档数(与 csv 共用 book_depth_of:只 1 或 5,残缺/>5 → 跳)。
+        const auto d = book_depth_of([&](std::size_t k) { return j.contains("bid_px_" + std::to_string(k)); });
+        if (!d) { skips.add(SkipReason::BadField); continue; }  // 残缺/>5 档
+        const std::size_t depth = *d;
         for (std::size_t k = 0; k < depth; ++k) {
           const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
           sbpx[k]  = j.at("bid_px" + s).get<std::string>();  bpx[k]  = sbpx[k];
