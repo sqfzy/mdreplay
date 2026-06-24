@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include "core/error.hpp"
 #include "core/record.hpp"
@@ -75,6 +76,7 @@ namespace mdreplay {
     rows.push_back(*rec);
   }
 
+  spdlog::debug("json '{}': {} 行", path, rows.size());
   return std::unique_ptr<Source>{std::make_unique<LoadedSource>(std::move(rows))};
 }
 

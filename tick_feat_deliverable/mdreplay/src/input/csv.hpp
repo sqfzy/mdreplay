@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <csv.hpp>
+#include <spdlog/spdlog.h>
 
 #include "core/error.hpp"
 #include "core/record.hpp"
@@ -119,6 +120,7 @@ struct BookColumns {
     return std::unexpected(Error::CsvParse);  // 迭代期不可恢复解析错误(罕见)
   }
 
+  spdlog::debug("csv '{}': {} 档, {} 行", path, depth, rows.size());
   return std::unique_ptr<Source>{std::make_unique<LoadedSource>(std::move(rows))};
 }
 
