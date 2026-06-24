@@ -1,16 +1,26 @@
 // test_main.cpp — 阶段 2 纯逻辑单元测试:scale / clock / merge。
 // 极简断言式(无框架,同 cpp 工程 test_core 风格);任一失败返回非零。
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
-#include <limits>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
+
+#include <gconf/shm/v2/board.h>
+#include <gconf/shm/v2/trade.h>
 
 #include "clock.hpp"
 #include "config.hpp"
+#include "fixed.hpp"
+#include "input/csv_source.hpp"
 #include "merge.hpp"
-#include "output/scale.hpp"
+#include "output/book_sink.hpp"
+#include "output/trade_sink.hpp"
 #include "record.hpp"
 
 static int g_fail = 0;
@@ -43,15 +53,45 @@ std::unique_ptr<mdreplay::Source> make_src(std::vector<std::int64_t> ts, std::ui
 }
 }  // namespace
 
-static void test_scale() {
+static void test_fixed() {
   using namespace mdreplay;
-  CHECK(to_scaled(68.84, 2).value() == 6884);            // happy
-  CHECK(to_scaled(0.0, 2).value() == 0);                 // 零
-  CHECK(to_scaled(static_cast<double>(kU32Max), 0).value() == kU32Max);  // u32 边界
-  CHECK(!to_scaled(4294967296.0, 0).has_value());        // 越界 +1
-  CHECK(!to_scaled(5e7, 2).has_value());                 // 5e7×100=5e9 > u32
-  CHECK(!to_scaled(-1.0, 2).has_value());                // 负
-  CHECK(!to_scaled(std::numeric_limits<double>::infinity(), 2).has_value());  // inf
+  std::uint32_t out[4];
+  // 价对:公共 scale = 组内最大小数位
+  {
+    const std::string_view in[] = {"68.8", "68.85"};
+    const auto sc = encode_group(in, out);
+    CHECK(sc.has_value() && *sc == 2);
+    CHECK(out[0] == 6880 && out[1] == 6885);  // 68.8→6880@s2, 68.85→6885
+  }
+  // 去尾零不计入精度
+  {
+    const std::string_view in[] = {"68.8400"};
+    const auto sc = encode_group(in, out);
+    CHECK(sc.has_value() && *sc == 2 && out[0] == 6884);
+  }
+  // 整数 → scale 0
+  {
+    const std::string_view in[] = {"69"};
+    const auto sc = encode_group(in, out);
+    CHECK(sc.has_value() && *sc == 0 && out[0] == 69);
+  }
+  // 小价高精度
+  {
+    const std::string_view in[] = {"0.00012345"};
+    const auto sc = encode_group(in, out);
+    CHECK(sc.has_value() && *sc == 8 && out[0] == 12345);
+  }
+  // 溢出自动降 scale:68000.12345678 在 s8 为 6.8e12>u32 → 降到 s4(6.8e8<u32)
+  {
+    const std::string_view in[] = {"68000.12345678"};
+    const auto sc = encode_group(in, out);
+    CHECK(sc.has_value() && *sc == 4 && out[0] == 680001234);
+  }
+  CHECK(!encode_group(std::array<std::string_view, 1>{"6a.5"}, out).has_value());  // 非法
+  CHECK(!encode_group(std::array<std::string_view, 1>{"-1.0"}, out).has_value());  // 负
+  CHECK(decimals_of("1.230") == 2);
+  CHECK(decimals_of("5") == 0);
+  CHECK(decimals_of("0.001") == 3);
 }
 
 static void test_clock() {
@@ -156,11 +196,67 @@ static void test_config() {
   CHECK(!parse_config(toml::parse("[replay]\nstart=\"not-a-date\"\n[[output]]\nformat=\"book\"\nshm=\"/s\"")).has_value());
 }
 
+static void test_e2e() {
+  using namespace mdreplay;
+  namespace v2 = gconf::shm::v2;
+
+  // book sink → Board 读回
+  {
+    auto     board = std::make_unique<v2::Board>();
+    BookSink sink(board.get());
+    Record   r;
+    r.kind = Kind::Book; r.ts_ns = 1000; r.gid = 21;  // SOLUSDT
+    r.price_scale = 2; r.qty_scale = 2;
+    r.bid_px = 6884; r.bid_qty = 190667; r.ask_px = 6885; r.ask_qty = 126072;
+    CHECK(sink.write(r).has_value());
+    v2::BoardSlot out;
+    CHECK(board->slot[21].read(out));
+    CHECK(out.exch_ns == 1000 && out.bid_px == 6884 && out.ask_px == 6885 && out.price_scale == 2);
+  }
+  // trade sink → Ring drain
+  {
+    auto      ring = std::make_unique<v2::TradeRing>();
+    TradeSink sink(ring.get());
+    Record    r;
+    r.kind = Kind::Trade; r.ts_ns = 2000; r.gid = 21; r.side = 1;
+    r.price_scale = 2; r.qty_scale = 2; r.px = 6884; r.qty = 2902;
+    CHECK(sink.write(r).has_value());
+    std::uint64_t tail = 0;
+    int           n = 0;
+    std::int64_t  ts = 0;
+    std::uint32_t px = 0;
+    std::uint8_t  side = 9;
+    ring->drain(tail, [&](const v2::TradePayload& p) { ++n; ts = p.exch_ns; px = p.px; side = p.side; });
+    CHECK(n == 1 && ts == 2000 && px == 6884 && side == 1);
+  }
+  // csv 解析(临时文件):编码正确 + 未知符号跳过
+  {
+    namespace fs = std::filesystem;
+    const std::string dir = "test_tmp";
+    fs::create_directories(dir);
+    {
+      std::ofstream o(dir + "/x_SOLUSDT.book.csv");
+      o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n";
+      o << "1000,SOLUSDT,68.84,1906.67,68.85,1260.72\n";
+      o << "2000,BADSYM,1,2,3,4\n";  // 未知符号 → 跳
+    }
+    std::size_t skipped = 0;
+    const auto  src = load_csv_source(dir + "/x_SOLUSDT.book.csv", Kind::Book, skipped);
+    CHECK(src.has_value());
+    CHECK(skipped == 1);
+    const Record* r = (*src)->peek();
+    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2);
+    CHECK(r->bid_px == 6884 && r->ask_px == 6885 && r->bid_qty == 190667 && r->ask_qty == 126072);
+    fs::remove_all(dir);
+  }
+}
+
 int main() {
-  test_scale();
+  test_fixed();
   test_clock();
   test_merge();
   test_config();
+  test_e2e();
   if (g_fail == 0) std::printf("all tests passed\n");
   else std::printf("%d checks FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;

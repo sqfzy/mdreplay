@@ -18,9 +18,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  spdlog::info("config: dir='{}' format={} realtime={} window=[{}..{}] scale(p{},q{})", cfg->dir,
-               cfg->input_format, cfg->realtime, cfg->start_ns, cfg->end_ns,
-               cfg->scale.default_price, cfg->scale.default_qty);
+  spdlog::info("config: dir='{}' format={} realtime={} window=[{}..{}]", cfg->dir,
+               cfg->input_format, cfg->realtime, cfg->start_ns, cfg->end_ns);
   for (const auto& o : cfg->outputs)
     spdlog::info("  output: format={} shm={} create={}", o.format, o.shm, o.create);
 
