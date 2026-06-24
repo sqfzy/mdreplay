@@ -1,25 +1,28 @@
 // main.cpp — mdreplay CLI 入口。
 //
-// 阶段 1 骨架:仅验证 gconf v2 契约(trade.h/board.h 的 static_assert)、核心类型、include 路径、
-// C++23 std::expected 与 spdlog 均可编译/链接。编排逻辑(load→discover→replay)在后续阶段填入。
+// 阶段 2:load_config → 打印解析结果(验证 toml++ 集成 + 校验逻辑)。
+// 编排(discover→open→replay)在阶段 3/4 接入。
 
-#include <cstdio>
+#include <string>
 
-#include <gconf/shm/v2/board.h>    // BBO Board(含 symbols.h)
-#include <gconf/shm/v2/names.h>    // 段名(BOOK/TRADE/...)
-#include <gconf/shm/v2/trade.h>    // 成交环(TradePayload/TradeEntry/TradeRing)
+#include <spdlog/spdlog.h>
 
-#include "error.hpp"
-#include "record.hpp"
+#include "config.hpp"
 
-int main() {
-  namespace v2 = gconf::shm::v2;
-  static_assert(sizeof(v2::TradeEntry) == 64 && sizeof(v2::BoardSlot) == 64);
+int main(int argc, char** argv) {
+  const std::string path = argc > 1 ? argv[1] : "config.toml";
 
-  std::printf("mdreplay skeleton ok | BOOK=%s | TRADE=%s | symbols=%d\n",
-              v2::BOOK, v2::TRADE, static_cast<int>(gconf::sym::N_GLOBAL_SYMBOL_IDS));
+  const auto cfg = mdreplay::load_config(path);
+  if (!cfg) {
+    spdlog::error("load config '{}' failed: {}", path, mdreplay::to_string(cfg.error()));
+    return 1;
+  }
 
-  // 占位:让核心类型参与编译,避免未使用告警。
-  const mdreplay::Record probe{};
-  return probe.kind == mdreplay::Kind::Book ? 0 : 0;
+  spdlog::info("config: dir='{}' format={} realtime={} window=[{}..{}] scale(p{},q{})", cfg->dir,
+               cfg->input_format, cfg->realtime, cfg->start_ns, cfg->end_ns,
+               cfg->scale.default_price, cfg->scale.default_qty);
+  for (const auto& o : cfg->outputs)
+    spdlog::info("  output: format={} shm={} create={}", o.format, o.shm, o.create);
+
+  return 0;
 }
