@@ -161,7 +161,7 @@ static void test_config() {
       dir = "d"
       [replay]
       realtime = 0.5
-      [[output]]
+      [output]
       format = "book"
       shm = "/s"
       create = true
@@ -169,14 +169,14 @@ static void test_config() {
     CHECK(c.has_value());
     CHECK(c->realtime == 0.5);
     CHECK(c->dir == "d");
-    CHECK(c->outputs.size() == 1);
+    CHECK(c->output.format == "book" && c->output.shm == "/s");
     CHECK(c->start_ns == kNoStart && c->end_ns == kNoEnd);  // 空窗口 → 无界
   }
   // 坏 realtime(>1)→ ConfigInvalid
   CHECK(!parse_config(toml::parse(
-            "[replay]\nrealtime=2.0\n[[output]]\nformat=\"book\"\nshm=\"/s\"")).has_value());
+            "[replay]\nrealtime=2.0\n[output]\nformat=\"book\"\nshm=\"/s\"")).has_value());
   // 未知 format → ConfigInvalid
-  CHECK(!parse_config(toml::parse("[[output]]\nformat=\"xxx\"\nshm=\"/s\"")).has_value());
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"xxx\"\nshm=\"/s\"")).has_value());
   // 空 outputs → ConfigInvalid
   CHECK(!parse_config(toml::parse("[input]\ndir=\"d\"")).has_value());
   // datetime 窗口 → 整秒 ns(不硬编码具体 epoch,验证落到 ns 量级)
@@ -184,7 +184,7 @@ static void test_config() {
     const auto c = parse_config(toml::parse(R"(
       [replay]
       start = "2026-06-23 00:00:00"
-      [[output]]
+      [output]
       format = "trade"
       shm = "/s"
     )"));
@@ -193,7 +193,7 @@ static void test_config() {
     CHECK(c->start_ns % 1'000'000'000LL == 0);  // 整秒 → ns
   }
   // 坏 datetime → ConfigInvalid
-  CHECK(!parse_config(toml::parse("[replay]\nstart=\"not-a-date\"\n[[output]]\nformat=\"book\"\nshm=\"/s\"")).has_value());
+  CHECK(!parse_config(toml::parse("[replay]\nstart=\"not-a-date\"\n[output]\nformat=\"book\"\nshm=\"/s\"")).has_value());
 }
 
 static void test_e2e() {

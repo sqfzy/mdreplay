@@ -25,14 +25,14 @@ struct OutputCfg {
 };
 
 struct Config {
-  std::string            input_format{"csv"};
-  std::string            dir;
-  double                 realtime{1.0};
-  std::int64_t           start_ns{kNoStart};
-  std::int64_t           end_ns{kNoEnd};
-  std::vector<OutputCfg> outputs;
-  std::string            log_level{"info"};
-  int                    progress_sec{5};
+  std::string  input_format{"csv"};
+  std::string  dir;
+  double       realtime{1.0};
+  std::int64_t start_ns{kNoStart};
+  std::int64_t end_ns{kNoEnd};
+  OutputCfg    output;  // 单入单出:一次只回放一种(book 或 trade)
+  std::string  log_level{"info"};
+  int          progress_sec{5};
 };
 
 // "YYYY-MM-DD HH:MM:SS"(UTC)→ epoch ns;空串 → sentinel(无界)。解析失败 → nullopt。
@@ -65,25 +65,19 @@ struct Config {
   cfg.start_ns = *start;
   cfg.end_ns   = *end;
 
-  if (const auto* arr = tbl["output"].as_array()) {
-    for (const auto& node : *arr) {
-      const auto* t = node.as_table();
-      if (!t) continue;
-      cfg.outputs.push_back(OutputCfg{
-          (*t)["format"].value_or<std::string>(""),
-          (*t)["shm"].value_or<std::string>(""),
-          (*t)["create"].value_or(true),
-      });
-    }
+  if (const auto* t = tbl["output"].as_table()) {
+    cfg.output = OutputCfg{
+        (*t)["format"].value_or<std::string>(""),
+        (*t)["shm"].value_or<std::string>(""),
+        (*t)["create"].value_or(true),
+    };
   }
 
   // 校验
   if (cfg.realtime < 0.0 || cfg.realtime > 1.0) return std::unexpected(Error::ConfigInvalid);
   if (cfg.start_ns > cfg.end_ns) return std::unexpected(Error::ConfigInvalid);
-  if (cfg.outputs.empty()) return std::unexpected(Error::ConfigInvalid);
-  for (const auto& o : cfg.outputs)
-    if ((o.format != "book" && o.format != "trade") || o.shm.empty())
-      return std::unexpected(Error::ConfigInvalid);
+  if ((cfg.output.format != "book" && cfg.output.format != "trade") || cfg.output.shm.empty())
+    return std::unexpected(Error::ConfigInvalid);
 
   return cfg;
 }

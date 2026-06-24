@@ -10,15 +10,10 @@ realtime = 1.0              # 0~1:值=有多实时。实际延迟 = 真实事件
 start = ""                  # 回放时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
 end   = ""                  # 回放时间窗止(留空=最晚),闭区间
 
-[[output]]
-format = "book"             # 输出流/编码器:book(→ gconf v2 Board)
+[output]                    # 单入单出:一次只回放一种。要 book 和 trade 都喂,跑两遍。
+format = "book"             # book | trade —— 决定读 *.<format>.csv + 写哪种段
 shm    = "/shm_bybit_lin_book_v2"
 create = true               # 生产者建段;false=attach 既有
-
-[[output]]
-format = "trade"            # 输出流/编码器:trade(→ gconf v2 BcastRing)
-shm    = "/shm_bybit_lin_trade_v2"
-create = true
 
 # 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale,
 #     逐记录写进 shm(见 src/fixed.hpp)。

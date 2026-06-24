@@ -51,15 +51,10 @@ realtime = 1.0            # 0~1:值=有多实时。延迟 = 真实间隔 × real
 start = ""                # 时间窗起(留空=最早),"2026-06-23 09:00:00"(UTC),可跨天
 end   = ""                # 时间窗止(留空=最晚),闭区间
 
-[[output]]                # 每条 = 一个段;format 选编码器(book/trade)
-format = "book"
+[output]                  # 单入单出:一次只回放一种。要 book + trade,跑两遍。
+format = "book"           # book | trade —— 决定读 *.<format>.csv + 写哪种段
 shm    = "/shm_bybit_lin_book_v2"
 create = true             # 生产者建段(O_TRUNC 清零幂等);false=attach 既有
-
-[[output]]
-format = "trade"
-shm    = "/shm_bybit_lin_trade_v2"
-create = true
 
 [log]
 level        = "info"     # trace|debug|info|warn|error
@@ -72,11 +67,11 @@ progress_sec = 5
 |---|---|
 | `input.format` / `input.dir` | `--format` / `--dir` |
 | `replay.realtime` / `start` / `end` | `--realtime` / `--start` / `--end` |
-| `output[i].format` / `shm` / `create` | `--output.<i>.format` / `--output.<i>.shm` / `--output.<i>.create` |
+| `output.format` / `shm` / `create` | `--output.format` / `--output.shm` / `--output.create` |
 | `log.level` / `progress_sec` | `--log-level` / `--progress-sec` |
 | — | `--config <path>`、`--help` |
 
-`<i>` 是 `[[output]]` 数组下标(0=第一个)。`mdreplay --help` 查看完整用法。
+要 book 和 trade 都喂下游,跑两遍(改 `--output.format` 与 `--output.shm`)。`mdreplay --help` 查看完整用法。
 
 ## 构建 / 运行
 
