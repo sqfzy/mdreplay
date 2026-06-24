@@ -1,0 +1,299 @@
+/** @file
+ *  Defines an object used to store CSV format settings
+ */
+
+#pragma once
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "common.hpp"
+#include "csv_exceptions.hpp"
+
+namespace csv {
+    namespace internals {
+        template<typename RowSink, typename ParsePolicy, typename FieldPolicy, typename RowPolicy>
+        class CSVParserCore;
+        namespace parser {
+            class CSVParserDriverBase;
+        }
+    }
+
+    class CSVReader;
+
+    /** Determines how to handle rows that are shorter or longer than the majority */
+    enum class VariableColumnPolicy {
+        THROW = -1,
+        IGNORE_ROW = 0,
+        KEEP   = 1,
+        KEEP_NON_EMPTY = 2
+    };
+
+    /** Determines how column name lookups are performed */
+    enum class ColumnNamePolicy {
+        EXACT = 0,            /**< Case-sensitive match (default) */
+        CASE_INSENSITIVE = 1  /**< Case-insensitive match */
+    };
+
+    /** Stores the inferred format of a CSV file. */
+    struct CSVGuessResult {
+        char delim;
+        int header_row;
+        size_t n_cols;
+    };
+
+    /** Stores information about how to parse a CSV file.
+     *  Can be used to construct a csv::CSVReader. 
+     */
+    class CSVFormat {
+    public:
+        /** Settings for parsing a RFC 4180 CSV file */
+        CSVFormat() = default;
+
+        /** Sets the delimiter of the CSV file
+         *
+         *  Passing a single delimiter disables delimiter inference. Header-row
+         *  inference still runs unless header_row()/no_header() was set explicitly
+         *  or column_names() was provided.
+         *
+         *  @throws `std::runtime_error` thrown if trim, quote, or possible delimiting characters overlap
+         */
+        CSVFormat& delimiter(char delim);
+
+        /** Sets a list of potential delimiters
+         *
+         *  Passing multiple delimiters enables delimiter inference.
+         *  
+         *  @throws `std::runtime_error` thrown if trim, quote, or possible delimiting characters overlap
+         */
+        CSVFormat& delimiter(const std::vector<char> & delim);
+
+        /** Sets the whitespace characters to be trimmed
+         *
+         *  @throws `std::runtime_error` thrown if trim, quote, or possible delimiting characters overlap
+         */
+        CSVFormat& trim(const std::vector<char> & ws);
+
+        /** Sets the quote character
+         *
+         *  @throws `std::runtime_error` thrown if trim, quote, or possible delimiting characters overlap
+         */
+        CSVFormat& quote(char quote);
+
+        /** Sets the column names.
+         *
+         *  @note Unsets any values set by header_row()
+         */
+        CSVFormat& column_names(const std::vector<std::string>& names);
+
+        /** Sets the header row
+         *
+         *  @param[in] row Row index containing column names; negative means no header row.
+         *  @note Unsets any values set by column_names()
+         */
+        CSVFormat& header_row(int row);
+
+        /** Tells the parser that this CSV has no header row
+         *
+         *  @note Equivalent to `header_row(-1)`
+         *
+         */
+        CSVFormat& no_header() {
+            this->header_row(-1);
+            return *this;
+        }
+
+        /** Turn quoting on or off */
+        CSVFormat& quote(bool use_quote) {
+            this->no_quote = !use_quote;
+            return *this;
+        }
+
+        /** Tells the parser how to handle columns of a different length than the others */
+        CONSTEXPR_14 CSVFormat& variable_columns(VariableColumnPolicy policy = VariableColumnPolicy::IGNORE_ROW) {
+            this->variable_column_policy = policy;
+            return *this;
+        }
+
+        /** Tells the parser how to handle columns of a different length than the others */
+        CONSTEXPR_14 CSVFormat& variable_columns(bool policy) {
+            this->variable_column_policy = (VariableColumnPolicy)policy;
+            return *this;
+        }
+
+        /** Sets the column name lookup policy.
+         *
+         *  @param[in] policy  Use ColumnNamePolicy::CASE_INSENSITIVE to allow
+         *                     case-insensitive column lookups via CSVRow::operator[]
+         *                     and CSVReader::index_of().
+         */
+        CONSTEXPR_14 CSVFormat& column_names_policy(ColumnNamePolicy policy) {
+            this->_column_name_policy = policy;
+            return *this;
+        }
+
+        /** Sets the chunk size used when reading the CSV
+         *
+         *  @param[in] size Chunk size in bytes (minimum: CSV_CHUNK_SIZE_FLOOR)
+         *  @throws std::invalid_argument if size < CSV_CHUNK_SIZE_FLOOR or size > CSV_CHUNK_SIZE_MAX
+         *
+         *  Use this when constructing a CSVReader from a filename and individual rows
+         *  may exceed the default 10MB chunk size. The value is passed to CSVReader at
+         *  construction time, before any data is read.
+         */
+        CSVFormat& chunk_size(size_t size);
+
+        /** Enable or disable parser threading at runtime.
+         *
+         *  Threading is enabled by default when the library is compiled with
+         *  `CSV_ENABLE_THREADS=1`. Disable it for workloads with many small CSVs
+         *  where a background parser thread costs more than it helps.
+         *
+         *  When disabled, CSVReader parses synchronously on the caller thread and
+         *  speculative parallel parsing is also disabled.
+         */
+        CONSTEXPR_14 CSVFormat& threading(bool enabled = true) {
+            this->_threading = enabled;
+            return *this;
+        }
+
+        /** Set the worker count used by speculative parallel parsing.
+         *
+         *  A value of 0 means "choose automatically" when the reader is created.
+         */
+        CONSTEXPR_14 CSVFormat& speculative_parallel_threads(size_t n_threads) {
+            this->_speculative_parallel_threads = n_threads;
+            return *this;
+        }
+
+        /** Set the minimum source size required for speculative parallel parsing. */
+        CONSTEXPR_14 CSVFormat& speculative_parallel_min_bytes(size_t bytes) {
+            this->_speculative_parallel_min_bytes = bytes;
+            return *this;
+        }
+
+        /** Enable parser-time scalar classification for typed consumers.
+         *
+         *  Disabled by default so normal string-only parsing keeps the historical
+         *  lazy classification cost model.
+         */
+        CONSTEXPR_14 CSVFormat& eager_field_classification(bool enabled = true) {
+            this->_eager_field_classification = enabled;
+            return *this;
+        }
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+        char get_delim() const {
+            // This error should never be received by end users.
+            if (this->possible_delimiters.size() > 1) {
+                throw std::runtime_error(internals::ERROR_MULTIPLE_DELIMITERS);
+            }
+
+            return this->possible_delimiters.at(0);
+        }
+
+        CONSTEXPR bool is_quoting_enabled() const { return !this->no_quote; }
+        CONSTEXPR char get_quote_char() const { return this->quote_char; }
+        CONSTEXPR int get_header() const { return this->header; }
+        std::vector<char> get_possible_delims() const { return this->possible_delimiters; }
+        std::vector<char> get_trim_chars() const { return this->trim_chars; }
+        const std::vector<std::string>& get_col_names() const { return this->col_names; }
+        CONSTEXPR VariableColumnPolicy get_variable_column_policy() const { return this->variable_column_policy; }
+        CONSTEXPR ColumnNamePolicy get_column_name_policy() const { return this->_column_name_policy; }
+        CONSTEXPR size_t get_chunk_size() const { return this->_chunk_size; }
+        CONSTEXPR bool is_threading_enabled() const {
+#if CSV_ENABLE_THREADS
+            return this->_threading;
+#else
+            return false;
+#endif
+        }
+        CONSTEXPR size_t get_speculative_parallel_threads() const { return this->_speculative_parallel_threads; }
+        CONSTEXPR size_t get_speculative_parallel_min_bytes() const { return this->_speculative_parallel_min_bytes; }
+        CONSTEXPR bool is_eager_field_classification_enabled() const { return this->_eager_field_classification; }
+        CONSTEXPR bool should_use_speculative_parallel(size_t source_size, size_t n_threads) const {
+#if CSV_ENABLE_THREADS
+            return this->_threading
+                && n_threads > 1
+                && source_size >= this->_speculative_parallel_min_bytes;
+#else
+            (void)source_size;
+            (void)n_threads;
+            return false;
+#endif
+        }
+#endif
+        
+        /** CSVFormat preset for delimiter inference with header/n_cols inference enabled. */
+        CSV_INLINE static CSVFormat guess_csv() {
+            CSVFormat format;
+            format.delimiter({ ',', '|', '\t', ';', '^' })
+                .quote('"');
+            // Assign header directly rather than via header_row() so that
+            // header_explicitly_set_ remains false — the guesser must be free
+            // to detect the real header row at construction time.
+            format.header = 0;
+
+            return format;
+        }
+
+        bool guess_delim() const {
+            return this->possible_delimiters.size() > 1;
+        }
+
+        friend CSVReader;
+        template<typename RowSink, typename ParsePolicy, typename FieldPolicy, typename RowPolicy>
+        friend class internals::CSVParserCore;
+        friend internals::parser::CSVParserDriverBase;
+        
+    private:
+        /**< Throws an error if delimiters and trim characters overlap */
+        void assert_no_char_overlap();
+
+        /**< Set of possible delimiters */
+        std::vector<char> possible_delimiters = { ',' };
+
+        /**< Set of whitespace characters to trim */
+        std::vector<char> trim_chars = {};
+
+        /**< Row number with columns; negative means no header row (ignored if col_names is non-empty) */
+        int header = 0;
+
+        /**< True if the user explicitly called header_row() or no_header() */
+        bool header_explicitly_set_ = false;
+
+        /**< Whether or not to use quoting */
+        bool no_quote = false;
+
+        /**< Quote character */
+        char quote_char = '"';
+
+        /**< Should be left empty unless file doesn't include header */
+        std::vector<std::string> col_names = {};
+
+        /**< True if the user explicitly called column_names() */
+        bool col_names_explicitly_set_ = false;
+
+        /**< Allow variable length columns? */
+        VariableColumnPolicy variable_column_policy = VariableColumnPolicy::IGNORE_ROW;
+
+        /**< Column name lookup policy */
+        ColumnNamePolicy _column_name_policy = ColumnNamePolicy::EXACT;
+
+        /**< Chunk size for reading; passed to CSVReader at construction time */
+        size_t _chunk_size = internals::CSV_CHUNK_SIZE_DEFAULT;
+
+        /**< Whether CSVReader may use runtime parser threads */
+        bool _threading = true;
+
+        /**< 0 means the reader may choose automatically */
+        size_t _speculative_parallel_threads = 0;
+
+        /**< Minimum source size before speculative parallel parsing is considered */
+        size_t _speculative_parallel_min_bytes = internals::CSV_SPECULATIVE_PARALLEL_MIN_BYTES;
+
+        /**< Whether to precompute field scalar classifications during parsing */
+        bool _eager_field_classification = false;
+    };
+}

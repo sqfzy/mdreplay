@@ -23,6 +23,7 @@
 #include "core/merge.hpp"
 #include "core/record.hpp"
 #include "core/report.hpp"
+#include "core/skip.hpp"
 #include "input/csv.hpp"
 #include "input/discover.hpp"
 #include "input/json.hpp"
@@ -51,8 +52,7 @@ void print_usage() {
       "  --start \"YYYY-MM-DD HH:MM:SS\"    时间窗起(UTC,留空=最早)\n"
       "  --end   \"YYYY-MM-DD HH:MM:SS\"    时间窗止(UTC,闭区间)\n"
       "  --output.format <shm|csv|json>  去向 (output.format)\n"
-      "  --output.shm <name>             shm 段名(format=shm)\n"
-      "  --output.path <file>            输出文件(format=csv|json)\n"
+      "  --output.path <dest>            去向定位:shm 段名(/开头)或输出文件路径\n"
       "  --output.create <true|false>    建段(true)/attach(false)(format=shm)\n"
       "  --log-level <trace|debug|info|warn|error>\n"
       "  --progress-sec <n>              进度日志间隔秒\n"
@@ -95,14 +95,13 @@ void print_usage() {
 // 应用 "--output.<key> <val>" 覆盖到 cfg.output(镜像 [output] 表路径)。
 [[nodiscard]] bool apply_output(Config& cfg, std::string_view key, const std::string& val) {
   if (key == "format") cfg.output.format = val;
-  else if (key == "shm") cfg.output.shm = val;
   else if (key == "path") cfg.output.path = val;
   else if (key == "create") {
     const auto b = parse_bool(val);
     if (!b) { spdlog::error("--output.create 需 true/false"); return false; }
     cfg.output.create = *b;
   } else {
-    spdlog::error("--output.{} 未知键(应为 format/shm/path/create)", key);
+    spdlog::error("--output.{} 未知键(应为 format/path/create)", key);
     return false;
   }
   return true;
@@ -177,11 +176,11 @@ void print_usage() {
     return std::nullopt;
   }
   const auto& o = cfg->output;
-  if (o.format == "shm" ? o.shm.empty() : (o.format == "csv" || o.format == "json") ? o.path.empty()
-                                                                                    : true) {
-    spdlog::error("output 非法:format='{}' shm='{}' path='{}'", o.format, o.shm, o.path);
+  if (o.format != "shm" && o.format != "csv" && o.format != "json") {
+    spdlog::error("output.format 须 shm/csv/json(得到 '{}')", o.format);
     return std::nullopt;
   }
+  if (o.path.empty()) { spdlog::error("output.path 不能为空"); return std::nullopt; }
   return *cfg;
 }
 
@@ -191,18 +190,27 @@ struct Output {
   std::unique_ptr<mdreplay::Sink> sink;
 };
 
-[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind) {
+// depth = 输入自动识别的档数(1 或 5),决定 book→shm 用 Board 还是 DepthBoard、csv 表头档数。
+[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind, std::size_t depth) {
   const auto& o = cfg.output;
   if (o.format == "shm") {
-    if (kind == Kind::Book) {
-      auto seg = mdreplay::ShmSegment::open(o.shm, sizeof(v2::Board), v2::SegKind::Board,
+    if (kind == Kind::Book && depth == 5) {  // 五档 → DepthBoard 段
+      auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::DepthBoard), v2::SegKind::Board,
+                                            sizeof(v2::DepthSlot), gconf::sym::N_GLOBAL_SYMBOL_IDS,
+                                            v2::kDepthBoardSchemaHash, o.create);
+      if (!seg) return std::unexpected(seg.error());
+      auto* board = reinterpret_cast<v2::DepthBoard*>(seg->base());
+      return Output{std::move(*seg), std::make_unique<mdreplay::DepthBookSink>(board)};
+    }
+    if (kind == Kind::Book) {  // BBO → Board 段
+      auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::Board), v2::SegKind::Board,
                                             sizeof(v2::BoardSlot), gconf::sym::N_GLOBAL_SYMBOL_IDS,
                                             v2::kBoardSchemaHash, o.create);
       if (!seg) return std::unexpected(seg.error());
       auto* board = reinterpret_cast<v2::Board*>(seg->base());
       return Output{std::move(*seg), std::make_unique<mdreplay::BookSink>(board)};
     }
-    auto seg = mdreplay::ShmSegment::open(o.shm, sizeof(v2::TradeRing), v2::SegKind::BcastRing,
+    auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::TradeRing), v2::SegKind::BcastRing,
                                           sizeof(v2::TradeEntry), v2::TRADE_RING_CAP,
                                           v2::kTradeSchemaHash, o.create);
     if (!seg) return std::unexpected(seg.error());
@@ -210,21 +218,28 @@ struct Output {
     return Output{std::move(*seg), std::make_unique<mdreplay::TradeSink>(ring)};
   }
   if (o.format == "csv") {
-    auto s = mdreplay::CsvSink::open(o.path, kind);
+    auto s = mdreplay::CsvSink::open(o.path, kind, depth);
     if (!s) return std::unexpected(s.error());
     return Output{{}, std::move(*s)};
   }
-  auto s = mdreplay::JsonSink::open(o.path, kind);  // json
+  auto s = mdreplay::JsonSink::open(o.path, kind);  // json:逐行按 record.depth 写,无需建表头
   if (!s) return std::unexpected(s.error());
   return Output{{}, std::move(*s)};
 }
 
+// 从已载入的源头探测档数(book 自动识别后写进 Record.depth):取首个非空源的首条记录;无则默认 1。
+[[nodiscard]] std::size_t detect_depth(const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
+  for (const auto& s : sources)
+    if (const mdreplay::Record* r = s->peek()) return r->depth;
+  return 1;
+}
+
 [[nodiscard]] std::vector<std::unique_ptr<mdreplay::Source>>
-load_sources(const Config& cfg, Kind kind, std::size_t& skipped) {
+load_sources(const Config& cfg, Kind kind, mdreplay::SkipStats& skips) {
   std::vector<std::unique_ptr<mdreplay::Source>> sources;
   for (const auto& fi : mdreplay::discover(cfg.dir, kind, cfg.input_format)) {
-    auto s = (cfg.input_format == "json") ? mdreplay::load_json_source(fi.path, fi.kind, skipped)
-                                          : mdreplay::load_csv_source(fi.path, fi.kind, skipped);
+    auto s = (cfg.input_format == "json") ? mdreplay::load_json_source(fi.path, fi.kind, skips)
+                                          : mdreplay::load_csv_source(fi.path, fi.kind, skips);
     if (!s) {  // 单文件错误(打不开/缺列)→ 命名跳过、不中断其余文件
       spdlog::warn("skip input '{}': {}", fi.path, mdreplay::to_string(s.error()));
       continue;
@@ -270,26 +285,29 @@ int main(int argc, char** argv) {
     cfg->realtime = 0.0;
   }
 
-  auto out = open_output(*cfg, kind);
+  // 先载入(book 自动识别档数,写进 Record.depth),再据探测到的档数开输出(选 Board/DepthBoard、定 csv 表头)。
+  mdreplay::SkipStats skips;
+  auto                sources = load_sources(*cfg, kind, skips);
+  if (sources.empty()) {
+    spdlog::error("no *.{}.{} under '{}'", cfg->input_kind, cfg->input_format, cfg->dir);
+    return 1;
+  }
+  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;
+  spdlog::info("input: {} {} sources, kind={}, depth={}, realtime={}, window=[{}..{}]", sources.size(),
+               cfg->input_format, cfg->input_kind, depth, cfg->realtime, cfg->start_ns, cfg->end_ns);
+  skips.log_summary();  // 跳过明细(分原因)+ 未知符号 WARN —— 在回放前一次性交代清楚
+
+  auto out = open_output(*cfg, kind, depth);
   if (!out) {
     spdlog::error("open output failed: {}", mdreplay::to_string(out.error()));
     return 1;
   }
   if (cfg->output.format == "shm")
-    spdlog::info("output: shm → {} ({})", cfg->output.shm,
-                 cfg->output.create ? "created" : "attached");
+    spdlog::info("output: shm → {} ({}, {} 档)", cfg->output.path,
+                 cfg->output.create ? "created" : "attached", depth);
   else
-    spdlog::info("output: {} → {}", cfg->output.format, cfg->output.path);
+    spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
 
-  std::size_t skipped = 0;
-  auto        sources = load_sources(*cfg, kind, skipped);
-  if (sources.empty()) {
-    spdlog::error("no *.{}.{} under '{}'", cfg->input_kind, cfg->input_format, cfg->dir);
-    return 1;
-  }
-  spdlog::info("input: {} {} sources, realtime={}, window=[{}..{}]", sources.size(),
-               cfg->input_format, cfg->realtime, cfg->start_ns, cfg->end_ns);
-
-  replay(*cfg, std::move(sources), *out->sink, skipped);
+  replay(*cfg, std::move(sources), *out->sink, skips.total());
   return 0;
 }

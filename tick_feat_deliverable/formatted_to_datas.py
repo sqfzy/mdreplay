@@ -29,7 +29,6 @@ from pathlib import Path
 TS, SIDE, PRICE, AMOUNT = 0, 1, 2, 3
 BP0, BA0, AP0, AA0 = 4, 19, 34, 49
 
-BOOK_HEADER = ["ts", "symbol", "bid_px", "bid_qty", "ask_px", "ask_qty"]
 TRADE_HEADER = ["ts", "symbol", "side", "px", "qty"]
 
 
@@ -40,6 +39,24 @@ def unscale_1e8(int_str: str) -> str:
     return s or "0"
 
 
+def book_header(depth: int) -> list[str]:
+    """book 表头:level0 不带后缀(= BBO);k≥1 为 bid_px_k 等。depth ∈ {1,5}。"""
+    cols = ["ts", "symbol"]
+    for k in range(depth):
+        s = "" if k == 0 else f"_{k}"
+        cols += [f"bid_px{s}", f"bid_qty{s}", f"ask_px{s}", f"ask_qty{s}"]
+    return cols
+
+
+def book_row(row: list[str], ts_ns: int, symbol: str, depth: int) -> list:
+    """从 64 列 OB 行取 depth 档(价 ×1e8→十进制,量原值透传)。"""
+    out: list = [ts_ns, symbol]
+    for k in range(depth):
+        out += [unscale_1e8(row[BP0 + k]), row[BA0 + k],
+                unscale_1e8(row[AP0 + k]), row[AA0 + k]]
+    return out
+
+
 def parse_venue_symbol(stem: str) -> tuple[str, str]:
     """'binance_swap_SOLUSDT_20260623' → ('binance', 'SOLUSDT')。"""
     parts = stem.split("_")
@@ -48,7 +65,7 @@ def parse_venue_symbol(stem: str) -> tuple[str, str]:
     return parts[0], parts[2]
 
 
-def convert_file(src: Path, out_dir: Path, dry_run: bool) -> tuple[int, int, int]:
+def convert_file(src: Path, out_dir: Path, dry_run: bool, depth: int = 1) -> tuple[int, int, int]:
     """转一个源文件 → 一对 book/trade 文件。返回 (book_rows, trade_rows, bad_rows)。"""
     venue, symbol = parse_venue_symbol(src.stem)
     book_path = out_dir / f"{venue}_{symbol}.book.csv"
@@ -63,7 +80,7 @@ def convert_file(src: Path, out_dir: Path, dry_run: bool) -> tuple[int, int, int
             trade_f = trade_path.open("w", newline="")
             book_w = csv.writer(book_f, lineterminator="\n")
             trade_w = csv.writer(trade_f, lineterminator="\n")
-            book_w.writerow(BOOK_HEADER)
+            book_w.writerow(book_header(depth))
             trade_w.writerow(TRADE_HEADER)
 
         with src.open(newline="") as f:
@@ -79,8 +96,7 @@ def convert_file(src: Path, out_dir: Path, dry_run: bool) -> tuple[int, int, int
                     if price == 0.0:  # OB 行 → book
                         book_rows += 1
                         if book_w:
-                            book_w.writerow([ts_ns, symbol, unscale_1e8(row[BP0]),
-                                             row[BA0], unscale_1e8(row[AP0]), row[AA0]])
+                            book_w.writerow(book_row(row, ts_ns, symbol, depth))
                     else:  # 成交行 → trade
                         trade_rows += 1
                         if trade_w:
@@ -102,6 +118,8 @@ def main() -> int:
     ap.add_argument("--src", default="formatted_2h", help="源目录(默认 formatted_2h)")
     ap.add_argument("--out", default="datas", help="输出目录(默认 datas)")
     ap.add_argument("--dry-run", action="store_true", help="只统计不落盘")
+    ap.add_argument("--depth", type=int, default=1, choices=(1, 5),
+                    help="book 档数:1(BBO,默认)或 5(五档)")
     args = ap.parse_args()
 
     src_dir = Path(args.src)
@@ -124,7 +142,7 @@ def main() -> int:
     tot_book = tot_trade = tot_bad = 0
     for i, src in enumerate(sources, 1):
         try:
-            b, t, bad = convert_file(src, out_dir, args.dry_run)
+            b, t, bad = convert_file(src, out_dir, args.dry_run, args.depth)
         except ValueError as e:
             print(f"  [skip] {src.name}: {e}", file=sys.stderr)
             continue

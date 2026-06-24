@@ -4,6 +4,7 @@
 format = "csv"             # csv | json —— 输入文件格式
 dir    = "datas"           # 输入目录;扫 *.<kind>.<format>(如 *.book.csv)
 kind   = "book"            # book | trade —— 一次只回放一种;要两者跑两遍
+                           # book 档数(1 或 5)由输入表头/键自动识别,无需配置
 
 [replay]
 realtime = 1.0             # 0~1:值=有多实时。1=原速(默认);0.5=2× 实时;0=尽快(可复现)
@@ -12,9 +13,8 @@ end   = ""                 # 时间窗止(留空=最晚),闭区间
 
 [output]
 format = "shm"             # shm | csv | json —— 去向
-shm    = "/shm_bybit_lin_book_v2"   # format=shm 时:段名
-path   = "out.book.csv"             # format=csv|json 时:输出文件
-create = true                       # format=shm 时:建段(O_TRUNC 幂等)/ false=attach
+path   = "/shm_bybit_lin_book_v2"   # 去向定位:shm=段名(/开头);csv|json=输出文件路径(如 out.book.csv)
+create = true                       # 仅 format=shm:建段(O_TRUNC 幂等)/ false=attach
 
 # 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale。
 

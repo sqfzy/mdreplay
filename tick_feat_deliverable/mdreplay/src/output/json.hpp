@@ -27,15 +27,20 @@ public:
     const auto sym = gconf::sym::global_symbol_id_name(r.gid);
     auto&      o   = *out_;
     o << "{\"ts\":" << r.ts_ns << ",\"symbol\":\"" << sym << "\",";
-    if (r.kind == Kind::Book)
-      o << "\"bid_px\":\"" << to_decimal(r.bid_px, r.price_scale) << "\",\"bid_qty\":\""
-        << to_decimal(r.bid_qty, r.qty_scale) << "\",\"ask_px\":\""
-        << to_decimal(r.ask_px, r.price_scale) << "\",\"ask_qty\":\""
-        << to_decimal(r.ask_qty, r.qty_scale) << "\"}\n";
-    else
+    if (r.kind == Kind::Book) {
+      for (std::size_t k = 0; k < r.depth; ++k) {  // level0 键不带后缀(= BBO),k≥1 为 bid_px_k 等
+        const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
+        o << "\"bid_px" << s << "\":\"" << to_decimal(r.bid_px[k], r.price_scale) << "\",\"bid_qty"
+          << s << "\":\"" << to_decimal(r.bid_qty[k], r.qty_scale) << "\",\"ask_px" << s << "\":\""
+          << to_decimal(r.ask_px[k], r.price_scale) << "\",\"ask_qty" << s << "\":\""
+          << to_decimal(r.ask_qty[k], r.qty_scale) << "\"" << (k + 1 < r.depth ? "," : "");
+      }
+      o << "}\n";
+    } else {
       o << "\"side\":" << static_cast<int>(r.side) << ",\"px\":\""
         << to_decimal(r.px, r.price_scale) << "\",\"qty\":\"" << to_decimal(r.qty, r.qty_scale)
         << "\"}\n";
+    }
     return {};
   }
 

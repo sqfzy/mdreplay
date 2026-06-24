@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <gconf/shm/v2/board.h>
+#include <gconf/shm/v2/depth_board.h>
 #include <gconf/shm/v2/seg_header.h>
 #include <gconf/shm/v2/trade.h>
 
@@ -99,14 +100,30 @@ class BookSink : public Sink {
 public:
   explicit BookSink(gconf::shm::v2::Board* board) : board_(board) {}
   Result<void> write(const Record& r) override {
-    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns),  // update_id = ts(单调)
-                              r.bid_px, r.bid_qty, r.ask_px, r.ask_qty, 0, 0, 0,  // 延迟:回放无
+    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns),       // update_id = ts(单调)
+                              r.bid_px[0], r.bid_qty[0], r.ask_px[0], r.ask_qty[0],  // BBO = 最优档
+                              0, 0, 0,                                              // 延迟:回放无
                               r.gid, r.price_scale, r.qty_scale, 0 /*path_idx*/);
     return {};
   }
 
 private:
   gconf::shm::v2::Board* board_;
+};
+
+// 五档 book → DepthBoard.slot[gid](latest-wins;Record 的 5 档定点数组直写)。
+class DepthBookSink : public Sink {
+public:
+  explicit DepthBookSink(gconf::shm::v2::DepthBoard* board) : board_(board) {}
+  Result<void> write(const Record& r) override {
+    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns), r.bid_px.data(),
+                              r.bid_qty.data(), r.ask_px.data(), r.ask_qty.data(), r.gid,
+                              r.price_scale, r.qty_scale, r.depth);
+    return {};
+  }
+
+private:
+  gconf::shm::v2::DepthBoard* board_;
 };
 
 class TradeSink : public Sink {

@@ -17,22 +17,37 @@ namespace mdreplay {
 
 class CsvSink : public Sink {
 public:
-  static Result<std::unique_ptr<CsvSink>> open(const std::string& path, Kind kind) {
+  // depth(1 或 5)决定 book 表头档数;level0 列名不带后缀(= BBO),k≥1 为 bid_px_k 等。
+  static Result<std::unique_ptr<CsvSink>> open(const std::string& path, Kind kind, std::size_t depth) {
     auto f = std::make_unique<std::ofstream>(path);
     if (!*f) return std::unexpected(Error::OutputOpen);
-    *f << (kind == Kind::Book ? "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n" : "ts,symbol,side,px,qty\n");
+    if (kind == Kind::Book) {
+      std::string hdr = "ts,symbol";
+      for (std::size_t k = 0; k < depth; ++k) {
+        const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
+        hdr += ",bid_px" + s + ",bid_qty" + s + ",ask_px" + s + ",ask_qty" + s;
+      }
+      *f << hdr << '\n';
+    } else {
+      *f << "ts,symbol,side,px,qty\n";
+    }
     return std::unique_ptr<CsvSink>(new CsvSink(std::move(f)));
   }
 
   Result<void> write(const Record& r) override {
     const auto sym = gconf::sym::global_symbol_id_name(r.gid);
-    if (r.kind == Kind::Book)
-      *out_ << r.ts_ns << ',' << sym << ',' << to_decimal(r.bid_px, r.price_scale) << ','
-            << to_decimal(r.bid_qty, r.qty_scale) << ',' << to_decimal(r.ask_px, r.price_scale) << ','
-            << to_decimal(r.ask_qty, r.qty_scale) << '\n';
-    else
+    if (r.kind == Kind::Book) {
+      *out_ << r.ts_ns << ',' << sym;
+      for (std::size_t k = 0; k < r.depth; ++k)  // 逐档:bid_px,bid_qty,ask_px,ask_qty
+        *out_ << ',' << to_decimal(r.bid_px[k], r.price_scale) << ','
+              << to_decimal(r.bid_qty[k], r.qty_scale) << ','
+              << to_decimal(r.ask_px[k], r.price_scale) << ','
+              << to_decimal(r.ask_qty[k], r.qty_scale);
+      *out_ << '\n';
+    } else {
       *out_ << r.ts_ns << ',' << sym << ',' << static_cast<int>(r.side) << ','
             << to_decimal(r.px, r.price_scale) << ',' << to_decimal(r.qty, r.qty_scale) << '\n';
+    }
     return {};
   }
 

@@ -167,12 +167,12 @@ static void test_config() {
       realtime = 0.5
       [output]
       format = "shm"
-      shm = "/s"
+      path = "/s"
     )"));
     CHECK(c.has_value());
     CHECK(c->realtime == 0.5);
     CHECK(c->dir == "d" && c->input_kind == "trade");
-    CHECK(c->output.format == "shm" && c->output.shm == "/s");
+    CHECK(c->output.format == "shm" && c->output.path == "/s");
     CHECK(c->start_ns == kNoStart && c->end_ns == kNoEnd);  // 空窗口 → 无界
   }
   // 文件输出 csv:需 path
@@ -180,10 +180,10 @@ static void test_config() {
     const auto c = parse_config(toml::parse("[output]\nformat=\"csv\"\npath=\"out.csv\""));
     CHECK(c.has_value() && c->output.format == "csv" && c->output.path == "out.csv");
   }
-  CHECK(!parse_config(toml::parse("[replay]\nrealtime=2.0\n[output]\nformat=\"shm\"\nshm=\"/s\"")).has_value());  // 坏 realtime
-  CHECK(!parse_config(toml::parse("[output]\nformat=\"xxx\"\nshm=\"/s\"")).has_value());        // 未知 output.format
+  CHECK(!parse_config(toml::parse("[replay]\nrealtime=2.0\n[output]\nformat=\"shm\"\npath=\"/s\"")).has_value());  // 坏 realtime
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"xxx\"\npath=\"/s\"")).has_value());        // 未知 output.format
   CHECK(!parse_config(toml::parse("[output]\nformat=\"csv\"")).has_value());                    // csv 缺 path
-  CHECK(!parse_config(toml::parse("[output]\nformat=\"shm\"\nshm=\"/s\"\n[input]\nkind=\"xxx\"")).has_value());  // 坏 kind
+  CHECK(!parse_config(toml::parse("[output]\nformat=\"shm\"\npath=\"/s\"\n[input]\nkind=\"xxx\"")).has_value());  // 坏 kind
   CHECK(!parse_config(toml::parse("[input]\ndir=\"d\"")).has_value());                          // 无 output
   // datetime 窗口 → 整秒 ns
   {
@@ -192,12 +192,12 @@ static void test_config() {
       start = "2026-06-23 00:00:00"
       [output]
       format = "shm"
-      shm = "/s"
+      path = "/s"
     )"));
     CHECK(c.has_value());
     CHECK(c->start_ns != kNoStart && c->start_ns > 0 && c->start_ns % 1'000'000'000LL == 0);
   }
-  CHECK(!parse_config(toml::parse("[replay]\nstart=\"bad\"\n[output]\nformat=\"shm\"\nshm=\"/s\"")).has_value());  // 坏 datetime
+  CHECK(!parse_config(toml::parse("[replay]\nstart=\"bad\"\n[output]\nformat=\"shm\"\npath=\"/s\"")).has_value());  // 坏 datetime
 }
 
 static void test_e2e() {
@@ -211,7 +211,7 @@ static void test_e2e() {
     Record   r;
     r.kind = Kind::Book; r.ts_ns = 1000; r.gid = 21;  // SOLUSDT
     r.price_scale = 2; r.qty_scale = 2;
-    r.bid_px = 6884; r.bid_qty = 190667; r.ask_px = 6885; r.ask_qty = 126072;
+    r.bid_px[0] = 6884; r.bid_qty[0] = 190667; r.ask_px[0] = 6885; r.ask_qty[0] = 126072;
     CHECK(sink.write(r).has_value());
     v2::BoardSlot out;
     CHECK(board->slot[21].read(out));
@@ -244,13 +244,13 @@ static void test_e2e() {
       o << "1000,SOLUSDT,68.84,1906.67,68.85,1260.72\n";
       o << "2000,BADSYM,1,2,3,4\n";  // 未知符号 → 跳
     }
-    std::size_t skipped = 0;
-    const auto  src = load_csv_source(dir + "/x_SOLUSDT.book.csv", Kind::Book, skipped);
+    SkipStats   skips;
+    const auto  src = load_csv_source(dir + "/x_SOLUSDT.book.csv", Kind::Book, skips);
     CHECK(src.has_value());
-    CHECK(skipped == 1);
+    CHECK(skips.total() == 1 && skips.count(SkipReason::UnknownSymbol) == 1);  // BADSYM 分类正确
     const Record* r = (*src)->peek();
-    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2);
-    CHECK(r->bid_px == 6884 && r->ask_px == 6885 && r->bid_qty == 190667 && r->ask_qty == 126072);
+    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2 && r->depth == 1);
+    CHECK(r->bid_px[0] == 6884 && r->ask_px[0] == 6885 && r->bid_qty[0] == 190667 && r->ask_qty[0] == 126072);
     fs::remove_all(dir);
   }
 }
@@ -263,7 +263,7 @@ static void test_file_io() {
 
   Record b;
   b.kind = Kind::Book; b.ts_ns = 1000; b.gid = 21; b.price_scale = 2; b.qty_scale = 2;
-  b.bid_px = 6884; b.bid_qty = 190667; b.ask_px = 6885; b.ask_qty = 126072;
+  b.bid_px[0] = 6884; b.bid_qty[0] = 190667; b.ask_px[0] = 6885; b.ask_qty[0] = 126072;
   Record t;
   t.kind = Kind::Trade; t.ts_ns = 2000; t.gid = 21; t.side = 1; t.price_scale = 2; t.qty_scale = 2;
   t.px = 6884; t.qty = 2902;
@@ -271,36 +271,161 @@ static void test_file_io() {
   // CSV 文件输出 → 读回(book)。sink 作用域结束即 flush+close,再读回。
   {
     const std::string p = dir + "/x.csv";
-    { const auto sink = CsvSink::open(p, Kind::Book);
+    { const auto sink = CsvSink::open(p, Kind::Book, 1);
       CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
-    std::size_t sk = 0;
+    SkipStats   sk;
     const auto  src = load_csv_source(p, Kind::Book, sk);
-    CHECK(src.has_value() && sk == 0);
+    CHECK(src.has_value() && sk.total() == 0);
     const Record* r = src.has_value() ? (*src)->peek() : nullptr;
     CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2);
-    CHECK(r && r->bid_px == 6884 && r->ask_px == 6885 && r->bid_qty == 190667 && r->ask_qty == 126072);
+    CHECK(r && r->bid_px[0] == 6884 && r->ask_px[0] == 6885 && r->bid_qty[0] == 190667 && r->ask_qty[0] == 126072);
   }
   // JSON 文件输出 → 读回(book)
   {
     const std::string p = dir + "/x.book.json";
     { const auto sink = JsonSink::open(p, Kind::Book);
       CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
-    std::size_t sk = 0;
+    SkipStats   sk;
     const auto  src = load_json_source(p, Kind::Book, sk);
-    CHECK(src.has_value() && sk == 0);
+    CHECK(src.has_value() && sk.total() == 0);
     const Record* r = src.has_value() ? (*src)->peek() : nullptr;
-    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->bid_px == 6884 && r->ask_px == 6885);
+    CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->bid_px[0] == 6884 && r->ask_px[0] == 6885);
   }
   // JSON 文件输出 → 读回(trade)
   {
     const std::string p = dir + "/x.trade.json";
     { const auto sink = JsonSink::open(p, Kind::Trade);
       CHECK(sink.has_value() && (*sink)->write(t).has_value()); }
-    std::size_t sk = 0;
+    SkipStats   sk;
     const auto  src = load_json_source(p, Kind::Trade, sk);
-    CHECK(src.has_value() && sk == 0);
+    CHECK(src.has_value() && sk.total() == 0);
     const Record* r = src.has_value() ? (*src)->peek() : nullptr;
     CHECK(r && r->ts_ns == 2000 && r->gid == 21 && r->side == 1 && r->px == 6884 && r->qty == 2902);
+  }
+  fs::remove_all(dir);
+}
+
+// CSV 解析委托 csv-parser 后的新能力:带引号/转义字段正确解析(旧手写 split 会把引号留在值里 →
+// fixed.hpp 拒为非数字 → 整行静默跳)。同时验证列数不符的 ragged 行仍计数跳过。
+static void test_csv_quoting() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_quote";
+  fs::create_directories(dir);
+  const std::string p = dir + "/q.trade.csv";
+  {
+    std::ofstream f(p);
+    f << "ts,symbol,side,px,qty\n";
+    f << "100,\"SOLUSDT\",0,\"68.84\",\"1906.67\"\n";  // 全字段带引号
+    f << "200,SOLUSDT,1,69.00,5\n";                     // 普通行
+    f << "300,SOLUSDT,1,69\n";                          // 列数不足 → 跳
+  }
+  SkipStats   sk;
+  const auto  src = load_csv_source(p, Kind::Trade, sk);
+  CHECK(src.has_value());
+  CHECK(sk.total() == 1 && sk.count(SkipReason::Malformed) == 1);  // 仅第 3 行(列数不符)被跳
+  if (src.has_value()) {
+    const Record* r0 = (*src)->peek();
+    CHECK(r0 && r0->ts_ns == 100 && r0->gid == 21 && r0->side == 0);
+    CHECK(r0 && r0->px == 6884 && r0->price_scale == 2 && r0->qty == 190667 && r0->qty_scale == 2);
+    (*src)->advance();
+    const Record* r1 = (*src)->peek();
+    CHECK(r1 && r1->ts_ns == 200 && r1->side == 1 && r1->px == 69 && r1->price_scale == 0);
+    (*src)->advance();
+    CHECK((*src)->peek() == nullptr);  // 第 3 行跳过后耗尽
+  }
+  fs::remove_all(dir);
+}
+
+// M1:跳过路径分原因归类(bad_ts / bad_field=side / bad_number),与 UnknownSymbol(test_e2e)、
+// Malformed(test_csv_quoting)合起来覆盖全部 SkipReason 的可达分支。
+static void test_skip_reasons() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_skip";
+  fs::create_directories(dir);
+  const std::string p = dir + "/s.trade.csv";
+  {
+    std::ofstream f(p);
+    f << "ts,symbol,side,px,qty\n";
+    f << "100,SOLUSDT,0,68.84,5\n";    // 好行
+    f << "abc,SOLUSDT,0,68.84,5\n";    // ts 非整数 → bad_ts
+    f << "200,SOLUSDT,7,68.84,5\n";    // side 非 0/1 → bad_field
+    f << "300,SOLUSDT,0,6x.8,5\n";     // px 非数字 → bad_number
+  }
+  SkipStats   sk;
+  const auto  src = load_csv_source(p, Kind::Trade, sk);
+  CHECK(src.has_value());
+  CHECK(sk.total() == 3);
+  CHECK(sk.count(SkipReason::BadTimestamp) == 1);
+  CHECK(sk.count(SkipReason::BadField) == 1);
+  CHECK(sk.count(SkipReason::BadNumber) == 1);
+  const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+  CHECK(r && r->ts_ns == 100);  // 唯一好行留下
+  fs::remove_all(dir);
+}
+
+// 五档:depth=5 解析全 5 档、csv 往返无损;且只 1/5 两种——depth=5 喂 1 档文件须 CsvSchema 失败(不截断)。
+static void test_book_depth5() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_d5";
+  fs::create_directories(dir);
+  const std::string p = dir + "/d5.book.csv";
+  {
+    std::ofstream o(p);
+    o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty,bid_px_1,bid_qty_1,ask_px_1,ask_qty_1,"
+         "bid_px_2,bid_qty_2,ask_px_2,ask_qty_2,bid_px_3,bid_qty_3,ask_px_3,ask_qty_3,"
+         "bid_px_4,bid_qty_4,ask_px_4,ask_qty_4\n";
+    o << "1000,SOLUSDT,68.84,10,68.85,20,68.83,11,68.86,21,68.82,12,68.87,22,"
+         "68.81,13,68.88,23,68.80,14,68.89,24\n";
+  }
+  // 5 档表头 → 自动识别 depth=5,逐档正确
+  {
+    SkipStats  sk;
+    const auto src = load_csv_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->depth == 5 && r->price_scale == 2 && r->qty_scale == 0);
+    CHECK(r && r->bid_px[0] == 6884 && r->ask_px[0] == 6885);   // 最优档
+    CHECK(r && r->bid_px[4] == 6880 && r->ask_px[4] == 6889);   // 第 5 档
+    CHECK(r && r->bid_qty[4] == 14 && r->ask_qty[4] == 24);
+  }
+  // 1 档表头 → 自动识别 depth=1(正常,非报错)
+  {
+    const std::string p1 = dir + "/bbo.book.csv";
+    { std::ofstream o(p1); o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n1,SOLUSDT,1,1,1,1\n"; }
+    SkipStats  sk;
+    const auto src = load_csv_source(p1, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->depth == 1 && r->bid_px[0] == 1);
+  }
+  // 残缺档(只到 _2,缺 _3/_4)→ 既非 1 也非 5 → 整文件 CsvSchema 拒绝(不截断)
+  {
+    const std::string p2 = dir + "/partial.book.csv";
+    { std::ofstream o(p2);
+      o << "ts,symbol,bid_px,bid_qty,ask_px,ask_qty,bid_px_1,bid_qty_1,ask_px_1,ask_qty_1,"
+           "bid_px_2,bid_qty_2,ask_px_2,ask_qty_2\n1,SOLUSDT,1,1,1,1,1,1,1,1,1,1,1,1\n"; }
+    SkipStats  sk;
+    const auto src = load_csv_source(p2, Kind::Book, sk);
+    CHECK(!src.has_value());  // 部分档 → 拒绝
+  }
+  // csv 5 档往返:写出(显式 5 档表头)再读回(自动识别 5),逐档一致
+  {
+    Record b;
+    b.kind = Kind::Book; b.ts_ns = 7; b.gid = 21; b.price_scale = 2; b.qty_scale = 0; b.depth = 5;
+    for (std::size_t k = 0; k < 5; ++k) {
+      b.bid_px[k] = 6884 - k; b.ask_px[k] = 6885 + k; b.bid_qty[k] = 10 + k; b.ask_qty[k] = 20 + k;
+    }
+    const std::string rp = dir + "/rt.book.csv";
+    { const auto sink = CsvSink::open(rp, Kind::Book, 5);
+      CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
+    SkipStats  sk;
+    const auto src = load_csv_source(rp, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->depth == 5 && r->bid_px[3] == 6881 && r->ask_qty[2] == 22);
   }
   fs::remove_all(dir);
 }
@@ -312,6 +437,9 @@ int main() {
   test_config();
   test_e2e();
   test_file_io();
+  test_csv_quoting();
+  test_skip_reasons();
+  test_book_depth5();
   if (g_fail == 0) std::printf("all tests passed\n");
   else std::printf("%d checks FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;
