@@ -92,6 +92,8 @@ static void test_fixed() {
   }
   CHECK(!encode_group(std::array<std::string_view, 1>{"6a.5"}, out).has_value());  // 非法
   CHECK(!encode_group(std::array<std::string_view, 1>{"-1.0"}, out).has_value());  // 负
+  // 超长整数部分:不得 uint64 回绕静默产错值,须判 ScaleOverflow(不 fits)
+  CHECK(!encode_group(std::array<std::string_view, 1>{"99999999999999999999999"}, out).has_value());
   CHECK(decimals_of("1.230") == 2);
   CHECK(decimals_of("5") == 0);
   CHECK(decimals_of("0.001") == 3);
