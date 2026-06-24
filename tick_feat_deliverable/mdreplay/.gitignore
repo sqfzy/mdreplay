@@ -1,0 +1,6 @@
+# xmake 构建产物
+/build/
+/.xmake/
+
+# 回放测试数据(由 mdreplay 之外的导出器生成,体积大,不入库)
+/datas/
