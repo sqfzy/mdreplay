@@ -227,11 +227,20 @@ struct Output {
   return Output{{}, std::move(*s)};
 }
 
-// 从已载入的源头探测档数(book 自动识别后写进 Record.depth):取首个非空源的首条记录;无则默认 1。
+// 从已载入的源头探测档数(book 自动识别后写进 Record.depth):取首个非空源的首条记录定档;
+// 若各源首记录档数不一致 → WARN(输出按首源档数,混档会产出不一致)。无记录 → 默认 1。
 [[nodiscard]] std::size_t detect_depth(const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
-  for (const auto& s : sources)
-    if (const mdreplay::Record* r = s->peek()) return r->depth;
-  return 1;
+  std::size_t depth = 1;
+  bool        found = false;
+  for (const auto& s : sources) {
+    const mdreplay::Record* r = s->peek();
+    if (!r) continue;
+    if (!found) { depth = r->depth; found = true; }
+    else if (r->depth != depth)
+      spdlog::warn("源间档数不一致(首源 {} 档,另有 {} 档);输出按 {} 档,混档输出可能不一致",
+                   depth, r->depth, depth);
+  }
+  return depth;
 }
 
 [[nodiscard]] std::vector<std::unique_ptr<mdreplay::Source>>
