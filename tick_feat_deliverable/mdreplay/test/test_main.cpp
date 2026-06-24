@@ -430,6 +430,81 @@ static void test_book_depth5() {
   fs::remove_all(dir);
 }
 
+// 五档 shm:DepthBookSink 写 DepthBoard → 读回逐档;BookSink 从 5 档 Record 只写最优档(L0)。
+static void test_depth_shm() {
+  using namespace mdreplay;
+  namespace v2 = gconf::shm::v2;
+  Record r;
+  r.kind = Kind::Book; r.ts_ns = 3000; r.gid = 21; r.price_scale = 2; r.qty_scale = 0; r.depth = 5;
+  for (std::size_t k = 0; k < 5; ++k) {
+    r.bid_px[k] = 6884 - k; r.bid_qty[k] = 10 + k; r.ask_px[k] = 6885 + k; r.ask_qty[k] = 20 + k;
+  }
+  // DepthBoard:全 5 档逐档读回
+  {
+    auto          board = std::make_unique<v2::DepthBoard>();
+    DepthBookSink sink(board.get());
+    CHECK(sink.write(r).has_value());
+    v2::DepthSlot out;
+    CHECK(board->slot[21].read(out));
+    CHECK(out.exch_ns == 3000 && out.depth == 5 && out.price_scale == 2);
+    CHECK(out.bid_px[0] == 6884 && out.ask_px[0] == 6885);
+    CHECK(out.bid_px[4] == 6880 && out.ask_qty[4] == 24);
+  }
+  // BBO Board:5 档 Record 喂 BookSink 只落最优档(L0),不报错、不串档
+  {
+    auto     board = std::make_unique<v2::Board>();
+    BookSink sink(board.get());
+    CHECK(sink.write(r).has_value());
+    v2::BoardSlot out;
+    CHECK(board->slot[21].read(out));
+    CHECK(out.exch_ns == 3000 && out.bid_px == 6884 && out.ask_px == 6885);
+  }
+}
+
+// json 五档:写出再读回(自动识别 5),逐档一致;并验 json 逐行可不同档(1 档行 + 5 档行混排)。
+static void test_json_depth5() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_jd5";
+  fs::create_directories(dir);
+  // 往返:5 档 Record → JsonSink → 读回
+  {
+    Record b;
+    b.kind = Kind::Book; b.ts_ns = 9; b.gid = 21; b.price_scale = 2; b.qty_scale = 1; b.depth = 5;
+    for (std::size_t k = 0; k < 5; ++k) {
+      b.bid_px[k] = 6884 - k; b.ask_px[k] = 6885 + k; b.bid_qty[k] = 100 + k; b.ask_qty[k] = 200 + k;
+    }
+    const std::string p = dir + "/x.book.json";
+    { const auto sink = JsonSink::open(p, Kind::Book);
+      CHECK(sink.has_value() && (*sink)->write(b).has_value()); }
+    SkipStats  sk;
+    const auto src = load_json_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r && r->depth == 5 && r->bid_px[4] == 6880 && r->ask_qty[3] == 203);
+  }
+  // 逐行混档:第 1 行 5 档、第 2 行 1 档 → 各按自身档数解析(json 允许行间不同)
+  {
+    const std::string p = dir + "/mix.book.json";
+    { std::ofstream o(p);
+      o << R"({"ts":1,"symbol":"SOLUSDT","bid_px":"1","bid_qty":"1","ask_px":"1","ask_qty":"1",)"
+           R"("bid_px_1":"1","bid_qty_1":"1","ask_px_1":"1","ask_qty_1":"1",)"
+           R"("bid_px_2":"1","bid_qty_2":"1","ask_px_2":"1","ask_qty_2":"1",)"
+           R"("bid_px_3":"1","bid_qty_3":"1","ask_px_3":"1","ask_qty_3":"1",)"
+           R"("bid_px_4":"1","bid_qty_4":"1","ask_px_4":"1","ask_qty_4":"1"})" << "\n";
+      o << R"({"ts":2,"symbol":"SOLUSDT","bid_px":"2","bid_qty":"2","ask_px":"2","ask_qty":"2"})" << "\n"; }
+    SkipStats  sk;
+    const auto src = load_json_source(p, Kind::Book, sk);
+    CHECK(src.has_value() && sk.total() == 0);
+    const Record* r0 = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r0 && r0->ts_ns == 1 && r0->depth == 5);
+    if (src.has_value()) (*src)->advance();
+    const Record* r1 = src.has_value() ? (*src)->peek() : nullptr;
+    CHECK(r1 && r1->ts_ns == 2 && r1->depth == 1);
+  }
+  fs::remove_all(dir);
+}
+
 int main() {
   test_fixed();
   test_clock();
@@ -440,6 +515,8 @@ int main() {
   test_csv_quoting();
   test_skip_reasons();
   test_book_depth5();
+  test_depth_shm();
+  test_json_depth5();
   if (g_fail == 0) std::printf("all tests passed\n");
   else std::printf("%d checks FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;
