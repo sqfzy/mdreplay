@@ -1,0 +1,33 @@
+# mdreplay —— 录制行情回放(多币多所混合)→ gconf v2 shm
+
+[input]
+format = "csv"              # csv | json(csv 先实现):决定文件解析器
+dir    = "datas"            # 录制根目录;扫该目录全部 *.book.csv / *.trade.csv(表头驱动)
+
+[replay]
+realtime = 1.0              # 0~1:值=有多实时。实际延迟 = 真实事件间隔 × realtime
+                            #   1 = 完全原速(默认);0.5 = 2× 实时;0 = 尽快(纯逻辑序、完全可复现)
+start = ""                  # 回放时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
+end   = ""                  # 回放时间窗止(留空=最晚),闭区间
+
+[[output]]
+format = "book"             # 输出流/编码器:book(→ gconf v2 Board)
+shm    = "/shm_bybit_lin_book_v2"
+create = true               # 生产者建段;false=attach 既有
+
+[[output]]
+format = "trade"            # 输出流/编码器:trade(→ gconf v2 BcastRing)
+shm    = "/shm_bybit_lin_trade_v2"
+create = true
+
+[scale]
+default_price = 2
+default_qty   = 3
+# 按 symbol 覆盖(高价/小数位多的币):
+# [scale.SOLUSDT]
+#   price = 2
+#   qty   = 2
+
+[log]
+level        = "info"       # trace | debug | info | warn | error
+progress_sec = 5            # 每 N 秒打一次进度(已发条数 / 当前 ts / lapped 计数)
