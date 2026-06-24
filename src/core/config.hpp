@@ -19,10 +19,9 @@
 namespace mdreplay {
 
 struct OutputCfg {
-  std::string format;  // "shm" | "csv" | "json" —— 去向
-  std::string shm;     // format=shm 时的段名
-  std::string path;    // format=csv|json 时的输出文件
-  bool        create{true};  // format=shm 时:建段 or attach
+  std::string format;        // "shm" | "csv" | "json" —— 去向
+  std::string path;          // 去向定位:shm=段名(/开头);csv|json=输出文件路径
+  bool        create{true};  // 仅 format=shm:建段 or attach
 };
 
 struct Config {
@@ -85,7 +84,6 @@ struct Config {
   if (const auto* t = tbl["output"].as_table()) {
     cfg.output = OutputCfg{
         (*t)["format"].value_or<std::string>(""),
-        (*t)["shm"].value_or<std::string>(""),
         (*t)["path"].value_or<std::string>(""),
         (*t)["create"].value_or(true),
     };
@@ -97,13 +95,9 @@ struct Config {
   if (cfg.input_kind != "book" && cfg.input_kind != "trade")
     return std::unexpected(Error::ConfigInvalid);
   const auto& o = cfg.output;
-  if (o.format == "shm") {
-    if (o.shm.empty()) return std::unexpected(Error::ConfigInvalid);
-  } else if (o.format == "csv" || o.format == "json") {
-    if (o.path.empty()) return std::unexpected(Error::ConfigInvalid);
-  } else {
+  if (o.format != "shm" && o.format != "csv" && o.format != "json")
     return std::unexpected(Error::ConfigInvalid);  // 未知 output.format
-  }
+  if (o.path.empty()) return std::unexpected(Error::ConfigInvalid);  // 去向定位必填
 
   return cfg;
 }

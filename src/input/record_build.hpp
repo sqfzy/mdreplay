@@ -1,57 +1,78 @@
 #pragma once
 // record_build.hpp — 字段(已拆好的字符串)→ Record。csv 与 json 两个解析器共用的输入契约逻辑。
 //
-// symbol→gid 用 gconf;价/量经 fixed.hpp 编码成定点(精度沿用数据);非法/未知符号 → nullopt
-// (调用方计数跳过)。book 的 bid/ask 用公共 price_scale、两量用公共 qty_scale。
+// symbol→gid 用 gconf;价/量经 fixed.hpp 编码成定点(精度沿用数据)。失败返回**分类的** SkipReason
+// (未知符号 / 数值非法 / scale 溢出),让调用方按原因归账而非笼统跳过。
+// book 的 bid/ask 用公共 price_scale、两量用公共 qty_scale。
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
-#include <optional>
+#include <expected>
+#include <span>
 #include <string_view>
 
+#include "core/error.hpp"
 #include "core/fixed.hpp"
 #include "core/gid.hpp"
 #include "core/record.hpp"
+#include "core/skip.hpp"
 
 namespace mdreplay {
 
-[[nodiscard]] inline std::optional<Record> make_book_record(std::int64_t ts, std::string_view sym,
-                                                            std::string_view bid_px,
-                                                            std::string_view bid_qty,
-                                                            std::string_view ask_px,
-                                                            std::string_view ask_qty) {
+// fixed.hpp 的编码错误 → 跳过原因:scale 越界单列,其余归数值非法。
+[[nodiscard]] inline SkipReason skip_of(Error e) noexcept {
+  return e == Error::ScaleOverflow ? SkipReason::ScaleOverflow : SkipReason::BadNumber;
+}
+
+// 多档 book:每个 span 含 depth 档(0=最优)。全档价共用 price_scale、全档量共用 qty_scale
+// (把 bid/ask 全档拼成一组编码,对齐 slot 单 scale);depth=1 即退化为 BBO,与旧契约逐字一致。
+[[nodiscard]] inline std::expected<Record, SkipReason> make_book_record(
+    std::int64_t ts, std::string_view sym, std::span<const std::string_view> bid_px,
+    std::span<const std::string_view> bid_qty, std::span<const std::string_view> ask_px,
+    std::span<const std::string_view> ask_qty) {
   const auto gid = gid_of(sym);
-  if (!gid) return std::nullopt;
-  std::uint32_t          pv[2]{}, qv[2]{};
-  const std::string_view ps[2] = {bid_px, ask_px};
-  const std::string_view qs[2] = {bid_qty, ask_qty};
-  const auto psc = encode_group(ps, pv);
-  const auto qsc = encode_group(qs, qv);
-  if (!psc || !qsc) return std::nullopt;
+  if (!gid) return std::unexpected(SkipReason::UnknownSymbol);
+  const std::size_t depth = bid_px.size();  // 调用方保证 4 个 span 等长且 ∈[1,kMaxDepth]
+
+  // 价组 = [bid0..bid_{d-1}, ask0..ask_{d-1}];量组同序。
+  std::array<std::string_view, 2 * kMaxDepth> px_in, qty_in;
+  std::array<std::uint32_t, 2 * kMaxDepth>    px_out{}, qty_out{};
+  for (std::size_t k = 0; k < depth; ++k) {
+    px_in[k]  = bid_px[k];  px_in[depth + k]  = ask_px[k];
+    qty_in[k] = bid_qty[k]; qty_in[depth + k] = ask_qty[k];
+  }
+  const auto psc = encode_group(std::span(px_in).first(2 * depth), std::span(px_out).first(2 * depth));
+  if (!psc) return std::unexpected(skip_of(psc.error()));
+  const auto qsc = encode_group(std::span(qty_in).first(2 * depth), std::span(qty_out).first(2 * depth));
+  if (!qsc) return std::unexpected(skip_of(qsc.error()));
+
   Record r;
-  r.kind = Kind::Book;
-  r.ts_ns = ts;
-  r.gid = *gid;
+  r.kind        = Kind::Book;
+  r.ts_ns       = ts;
+  r.gid         = *gid;
+  r.depth       = static_cast<std::uint8_t>(depth);
   r.price_scale = *psc;
-  r.qty_scale = *qsc;
-  r.bid_px = pv[0];
-  r.ask_px = pv[1];
-  r.bid_qty = qv[0];
-  r.ask_qty = qv[1];
+  r.qty_scale   = *qsc;
+  for (std::size_t k = 0; k < depth; ++k) {
+    r.bid_px[k]  = px_out[k];      r.ask_px[k]  = px_out[depth + k];
+    r.bid_qty[k] = qty_out[k];     r.ask_qty[k] = qty_out[depth + k];
+  }
   return r;
 }
 
-[[nodiscard]] inline std::optional<Record> make_trade_record(std::int64_t ts, std::string_view sym,
-                                                             std::int64_t side, std::string_view px,
-                                                             std::string_view qty) {
-  if (side != 0 && side != 1) return std::nullopt;
+[[nodiscard]] inline std::expected<Record, SkipReason> make_trade_record(
+    std::int64_t ts, std::string_view sym, std::int64_t side, std::string_view px,
+    std::string_view qty) {
+  if (side != 0 && side != 1) return std::unexpected(SkipReason::BadField);
   const auto gid = gid_of(sym);
-  if (!gid) return std::nullopt;
+  if (!gid) return std::unexpected(SkipReason::UnknownSymbol);
   std::uint32_t          pv[1]{}, qv[1]{};
   const std::string_view ps[1] = {px}, qs[1] = {qty};
   const auto psc = encode_group(ps, pv);
+  if (!psc) return std::unexpected(skip_of(psc.error()));
   const auto qsc = encode_group(qs, qv);
-  if (!psc || !qsc) return std::nullopt;
+  if (!qsc) return std::unexpected(skip_of(qsc.error()));
   Record r;
   r.kind = Kind::Trade;
   r.ts_ns = ts;
