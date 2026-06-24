@@ -536,8 +536,20 @@ static void test_overflow_and_badvalue() {
   fs::remove_all(dir);
 }
 
+// book_depth_of:档数判定唯一真相源,纯逻辑穷举(1 / 5 / 残缺 / 中缺 / >5)。
+static void test_book_depth_of() {
+  using namespace mdreplay;
+  CHECK(book_depth_of([](std::size_t) { return false; }) == std::optional<std::size_t>{1});  // 无高档→1
+  CHECK(book_depth_of([](std::size_t k) { return k >= 1 && k <= 4; }) ==
+        std::optional<std::size_t>{5});                                                       // _1.._4→5
+  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k == 2; }).has_value());          // 残缺(只到_2)
+  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k == 3 || k == 4; }).has_value()); // 中缺_2
+  CHECK(!book_depth_of([](std::size_t k) { return k >= 1 && k <= 5; }).has_value());           // 含_5 >5
+}
+
 int main() {
   test_fixed();
+  test_book_depth_of();
   test_clock();
   test_merge();
   test_config();
