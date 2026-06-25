@@ -259,11 +259,10 @@ load_sources(const Config& cfg, Kind kind, mdreplay::SkipStats& skips) {
 }
 
 void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> sources,
-            mdreplay::Sink& sink, std::size_t skipped) {
+            mdreplay::Sink& sink, const mdreplay::SkipStats& skips) {
   mdreplay::Merger   merger(std::move(sources), cfg.start_ns, cfg.end_ns);
   mdreplay::Clock    clock(cfg.realtime);
-  mdreplay::Reporter reporter(cfg.progress_sec);
-  reporter.add_skipped(skipped);
+  mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
   while (const auto rec = merger.next()) {
     clock.pace_to(rec->ts_ns);
     (void)sink.write(*rec);
@@ -304,7 +303,6 @@ int main(int argc, char** argv) {
   const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;
   spdlog::info("input: {} {} sources, kind={}, depth={}, realtime={}, window=[{}..{}]", sources.size(),
                cfg->input_format, cfg->input_kind, depth, cfg->realtime, cfg->start_ns, cfg->end_ns);
-  skips.log_summary();  // 跳过明细(分原因)+ 未知符号 WARN —— 在回放前一次性交代清楚
 
   auto out = open_output(*cfg, kind, depth);
   if (!out) {
@@ -317,6 +315,8 @@ int main(int argc, char** argv) {
   else
     spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
 
-  replay(*cfg, std::move(sources), *out->sink, skips.total());
+  replay(*cfg, std::move(sources), *out->sink, skips);
+  // 流式:skip 在回放消费期才累加;回放后一次性交代分原因明细 + 未知符号 WARN。
+  skips.log_summary();
   return 0;
 }

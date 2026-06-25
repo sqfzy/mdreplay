@@ -8,9 +8,9 @@
 #include <expected>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -23,24 +23,31 @@
 
 namespace mdreplay {
 
-// book 档数由每行对象的键**自动识别**,只接受 1 或满 5 档;残缺/>5 档 → BadField 跳过该行(不截断)。
-// (json 无表头,逐行判定,行间可不同档,各按自身 1 或 5。)
-[[nodiscard]] inline Result<std::unique_ptr<Source>> load_json_source(const std::string& path,
-                                                                      Kind kind, SkipStats& skips) {
-  std::ifstream f(path);
-  if (!f) return std::unexpected(Error::FileOpen);
+// 流式 JSONL 源:持 ifstream,advance() 时才 getline+解析下一行(只缓冲 1 条 head_)。
+// 峰值内存 O(1 条 + 一行)。book 档数逐行自动识别(只 1 或满 5,残缺/>5 → BadField 跳该行,不截断)。
+class StreamingJsonSource : public Source {
+public:
+  StreamingJsonSource(std::ifstream f, Kind kind, SkipStats& skips)
+      : f_(std::move(f)), kind_(kind), skips_(&skips) {
+    advance();  // 预读首条进 head_
+  }
 
-  std::vector<Record> rows;
-  std::string         line;
-  // 逐行复用:持有字符串(string_view 指向它们)+ 视图缓冲。
-  std::array<std::string, kMaxDepth>      sbpx, sbqty, sapx, saqty;
-  std::array<std::string_view, kMaxDepth> bpx, bqty, apx, aqty;
-  while (std::getline(f, line)) {
-    chomp_cr(line);
-    if (line.empty()) continue;
+  [[nodiscard]] const Record* peek() override { return head_ ? &*head_ : nullptr; }
 
+  void advance() override {
+    head_.reset();
+    while (std::getline(f_, line_)) {
+      chomp_cr(line_);
+      if (line_.empty()) continue;
+      if (auto rec = build_from_line(line_)) { head_ = std::move(*rec); return; }
+    }
+  }
+
+private:
+  // 一行 JSONL → Record;跳过(已按原因归账)返回 nullopt。
+  [[nodiscard]] std::optional<Record> build_from_line(const std::string& line) {
     const auto j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) { skips.add(SkipReason::Malformed); continue; }
+    if (j.is_discarded() || !j.is_object()) { skips_->add(SkipReason::Malformed); return std::nullopt; }
 
     // 缺字段 / 类型错 → json 异常,归 BadField(symbol 可能未取到,未知符号交给 make_*_record 分类)。
     std::string                       sym;
@@ -48,34 +55,48 @@ namespace mdreplay {
     try {
       const auto ts = j.at("ts").get<std::int64_t>();
       sym           = j.at("symbol").get<std::string>();
-      if (kind == Kind::Book) {
-        // 自动识别档数(与 csv 共用 book_depth_of:只 1 或 5,残缺/>5 → 跳)。
+      if (kind_ == Kind::Book) {
         const auto d = book_depth_of([&](std::size_t k) { return j.contains("bid_px_" + std::to_string(k)); });
-        if (!d) { skips.add(SkipReason::BadField); continue; }  // 残缺/>5 档
+        if (!d) { skips_->add(SkipReason::BadField); return std::nullopt; }  // 残缺/>5 档
         const std::size_t depth = *d;
         for (std::size_t k = 0; k < depth; ++k) {
           const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
-          sbpx[k]  = j.at("bid_px" + s).get<std::string>();  bpx[k]  = sbpx[k];
-          sbqty[k] = j.at("bid_qty" + s).get<std::string>(); bqty[k] = sbqty[k];
-          sapx[k]  = j.at("ask_px" + s).get<std::string>();  apx[k]  = sapx[k];
-          saqty[k] = j.at("ask_qty" + s).get<std::string>(); aqty[k] = saqty[k];
+          sbpx_[k]  = j.at("bid_px" + s).get<std::string>();  bpx_[k]  = sbpx_[k];
+          sbqty_[k] = j.at("bid_qty" + s).get<std::string>(); bqty_[k] = sbqty_[k];
+          sapx_[k]  = j.at("ask_px" + s).get<std::string>();  apx_[k]  = sapx_[k];
+          saqty_[k] = j.at("ask_qty" + s).get<std::string>(); aqty_[k] = saqty_[k];
         }
-        rec = make_book_record(ts, sym, std::span(bpx).first(depth), std::span(bqty).first(depth),
-                               std::span(apx).first(depth), std::span(aqty).first(depth));
+        rec = make_book_record(ts, sym, std::span(bpx_).first(depth), std::span(bqty_).first(depth),
+                               std::span(apx_).first(depth), std::span(aqty_).first(depth));
       } else {
         rec = make_trade_record(ts, sym, j.at("side").get<std::int64_t>(),
                                 j.at("px").get<std::string>(), j.at("qty").get<std::string>());
       }
     } catch (const nlohmann::json::exception&) {
-      skips.add(SkipReason::BadField);
-      continue;
+      skips_->add(SkipReason::BadField);
+      return std::nullopt;
     }
-    if (!rec) { account_build_failure(skips, rec.error(), sym); continue; }
-    rows.push_back(*rec);
+    if (!rec) { account_build_failure(*skips_, rec.error(), sym); return std::nullopt; }
+    return *rec;
   }
 
-  spdlog::debug("json '{}': {} 行", path, rows.size());
-  return std::unique_ptr<Source>{std::make_unique<LoadedSource>(std::move(rows))};
+  std::ifstream         f_;
+  Kind                  kind_;
+  SkipStats*            skips_;
+  std::string           line_;  // 逐 advance 复用
+  std::optional<Record> head_;
+  std::array<std::string, kMaxDepth>      sbpx_, sbqty_, sapx_, saqty_;  // 持有串(视图指向它们)
+  std::array<std::string_view, kMaxDepth> bpx_, bqty_, apx_, aqty_;
+};
+
+// 开一个 JSONL 文件 → 流式 Source。文件打不开 → 上抛;坏/未知行在消费(advance)时归账到 skips。
+// (json 无表头,逐行判定,行间可不同档,各按自身 1 或 5。)
+[[nodiscard]] inline Result<std::unique_ptr<Source>> load_json_source(const std::string& path,
+                                                                      Kind kind, SkipStats& skips) {
+  std::ifstream f(path);
+  if (!f) return std::unexpected(Error::FileOpen);
+  spdlog::debug("json '{}': 流式载入", path);
+  return std::unique_ptr<Source>{std::make_unique<StreamingJsonSource>(std::move(f), kind, skips)};
 }
 
 }  // namespace mdreplay
