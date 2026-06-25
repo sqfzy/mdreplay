@@ -401,6 +401,7 @@ int main(int argc, char** argv) {
     spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
 
   if (!replay(*cfg, std::move(sources), *out->sink, skips)) return 1;  // anchor 不合理 → 已报错,拒启动
+  out->sink->on_finish();          // 去向相关收尾(trade 环绕圈告警等)
   if (mdreplay::stop_requested())  // 收到信号:在干净边界停了,产出截至中断点有效
     spdlog::warn("收到中断信号,已优雅停止(产出截至中断点有效,下方为截至此刻的汇总)");
   // 流式:skip 在回放消费期才累加;回放后一次性交代分原因明细 + 未知符号 WARN。
