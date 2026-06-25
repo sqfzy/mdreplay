@@ -10,6 +10,7 @@ namespace mdreplay {
 struct Sink {
   virtual ~Sink() = default;
   virtual Result<void> write(const Record&) = 0;
+  virtual void         on_finish() {}  // 回放结束时去向相关收尾(默认无;trade 环用它打绕圈告警)
 };
 
 }  // namespace mdreplay

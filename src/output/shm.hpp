@@ -16,6 +16,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <spdlog/spdlog.h>
+
 #include <gconf/shm/v2/board.h>
 #include <gconf/shm/v2/depth_board.h>
 #include <gconf/shm/v2/seg_header.h>
@@ -139,11 +141,21 @@ public:
     p.price_scale      = r.price_scale;
     p.qty_scale        = r.qty_scale;
     ring_->publish(p);
+    ++published_;
     return {};
+  }
+
+  // 广播环不背压(铁律 3):发布数超过环容量即绕圈覆盖。收尾时告知绕了几圈 + 无损跟上之道。
+  void on_finish() override {
+    constexpr std::uint64_t cap = gconf::shm::v2::TRADE_RING_CAP;
+    if (published_ > cap)
+      spdlog::warn("trade 共发布 {} 条 > 环容量 {} → 广播环绕圈 ~{} 次;realtime=0 全速灌时消费者只拿"
+                   "最近一圈(要无损跟上,用 realtime=1.0 真盘节奏)", published_, cap, published_ / cap);
   }
 
 private:
   gconf::shm::v2::TradeRing* ring_;
+  std::uint64_t              published_{0};
 };
 
 }  // namespace mdreplay
