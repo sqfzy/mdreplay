@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <optional>
@@ -24,6 +25,12 @@ struct OutputCfg {
   bool        create{true};  // 仅 format=shm:建段 or attach
 };
 
+// 时序锚:把数据时刻钉到墙钟,多进程填同值即同钟。存在=启用,缺省=各锚首事件(默认)。
+struct AnchorCfg {
+  std::int64_t data_ts_ns;    // 数据时刻原点(epoch ns)
+  std::int64_t system_ts_ns;  // 该时刻对应的墙钟(epoch ns,UTC)
+};
+
 struct Config {
   std::string  input_format{"csv"};  // csv | json —— 输入文件格式
   std::string  dir;
@@ -31,6 +38,7 @@ struct Config {
   double       realtime{1.0};
   std::int64_t start_ns{kNoStart};
   std::int64_t end_ns{kNoEnd};
+  std::optional<AnchorCfg> anchor;   // 留空=不同步;两端齐备=启用 system_clock 同钟
   OutputCfg    output;
   std::string  log_level{"info"};
   int          progress_sec{5};
@@ -65,6 +73,15 @@ struct Config {
   return static_cast<std::int64_t>(secs) * 1'000'000'000LL;
 }
 
+// anchor 字段取值:裸整数 = epoch ns;否则按 UTC datetime("YYYY-MM-DD HH:MM:SS")。空/非法 → nullopt。
+[[nodiscard]] inline std::optional<std::int64_t> parse_anchor_value(const std::string& s) {
+  if (s.empty()) return std::nullopt;
+  char*           end = nullptr;
+  const long long v   = std::strtoll(s.c_str(), &end, 10);
+  if (end == s.c_str() + s.size()) return static_cast<std::int64_t>(v);  // 全消费 → 裸 ns
+  return parse_datetime_ns(s, 0);                                        // 否则 datetime(非空,失败→nullopt)
+}
+
 // 从已解析的 table 提取 + 校验 → Config(纯,可单测)。
 [[nodiscard]] inline Result<Config> parse_config(const toml::table& tbl) {
   Config cfg;
@@ -80,6 +97,19 @@ struct Config {
   if (!start || !end) return std::unexpected(Error::ConfigInvalid);
   cfg.start_ns = *start;
   cfg.end_ns   = *end;
+
+  // [replay].anchor 内联表:data_ts + system_ts 两端都齐才算启用;只给一半 → 映射不完整,拒。
+  if (const auto* a = tbl["replay"]["anchor"].as_table()) {
+    const auto field = [&](const char* key) -> std::optional<std::int64_t> {
+      const auto n = (*a)[key];
+      if (const auto i = n.template value<std::int64_t>()) return *i;           // 裸 ns
+      if (const auto s = n.template value<std::string>()) return parse_anchor_value(*s);
+      return std::nullopt;
+    };
+    const auto d = field("data_ts"), s = field("system_ts");
+    if (!d || !s) return std::unexpected(Error::ConfigInvalid);
+    cfg.anchor = AnchorCfg{*d, *s};
+  }
 
   if (const auto* t = tbl["output"].as_table()) {
     cfg.output = OutputCfg{

@@ -468,6 +468,50 @@ static void test_book_depth5() {
   fs::remove_all(dir);
 }
 
+// 时序锚:同一 anchor 的两 Clock 对同一 ts 算出同一墙钟目标(= 跨进程同钟的根据);config 两端齐才启用。
+static void test_anchor() {
+  using namespace mdreplay;
+  // realtime=1:墙钟间隔 = 数据间隔;两 Clock 同 anchor → 同 ts 同目标
+  const Clock::Anchor a{1000, 5000};  // data_ts=1000ns ↔ system_ts=5000ns
+  Clock               c1(1.0, a), c2(1.0, a);
+  CHECK(c1.target_system_ns(2000) == c2.target_system_ns(2000));
+  CHECK(c1.target_system_ns(2000) == 5000 + (2000 - 1000));
+  // realtime=0.5(2× 速):数据 2000ns 跨度 → 墙钟 1000ns
+  Clock h(0.5, Clock::Anchor{1000, 5000});
+  CHECK(h.target_system_ns(3000) == 5000 + static_cast<std::int64_t>((3000 - 1000) * 0.5));
+
+  // config:两端齐 → 启用(ns 写法)
+  {
+    const auto t = toml::parse(
+        "[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
+        "[replay]\nanchor = { data_ts = 1000, system_ts = 5000 }\n");
+    const auto cfg = parse_config(t);
+    CHECK(cfg.has_value() && cfg->anchor && cfg->anchor->data_ts_ns == 1000 &&
+          cfg->anchor->system_ts_ns == 5000);
+  }
+  // config:datetime 写法,值 = parse_datetime_ns 口径
+  {
+    const auto t = toml::parse(
+        "[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
+        "[replay]\nanchor = { data_ts = \"2026-06-23 08:00:00\", system_ts = \"2026-06-25 14:00:00\" }\n");
+    const auto cfg = parse_config(t);
+    CHECK(cfg.has_value() && cfg->anchor &&
+          cfg->anchor->data_ts_ns == *parse_datetime_ns("2026-06-23 08:00:00", 0));
+  }
+  // 只给一半 → 映射不完整 → ConfigInvalid
+  {
+    const auto t = toml::parse("[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
+                               "[replay]\nanchor = { data_ts = 1000 }\n");
+    CHECK(!parse_config(t).has_value());
+  }
+  // 不写 anchor → 不启用(默认)
+  {
+    const auto t   = toml::parse("[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n");
+    const auto cfg = parse_config(t);
+    CHECK(cfg.has_value() && !cfg->anchor);
+  }
+}
+
 // format=auto:目录里只一种格式 → 识别;两种并存或都没有 → nullopt(自描述报错由 detect 内部打)。
 static void test_format_auto() {
   using namespace mdreplay;
@@ -648,6 +692,7 @@ int main() {
   test_degenerate_files();
   test_clock();
   test_signal();
+  test_anchor();
   test_merge();
   test_config();
   test_e2e();

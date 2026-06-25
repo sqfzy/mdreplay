@@ -108,6 +108,15 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
 - **内存:流式逐行读,峰值与文件大小/总行数无关(实测 266MB 输入仅 ~0MB 已提交堆)**。每源持一个常开文件
   句柄、只缓冲 1 条记录 → 多天数据全放一个目录**单次连续回放不 OOM**(一个连续时钟,跨天节奏无缝)。
   唯一随**文件数**线性涨的是文件句柄(受 `ulimit -n`,默认 1024);单次跑 >1000 个文件时 `ulimit -n 4096`。
+- **跨进程同钟(时序锚)**:单入单出意味着 book 与 trade 分两进程跑,各自锚首事件会**墙钟错位**。配
+  `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`play_wall(ts)=system_ts+(ts−data_ts)×realtime`)
+  后,多进程填**同一 anchor + 同 realtime** → 对同一 ts 算出同一墙钟 → 严格同钟(跨 venue、跨机靠 NTP 亦可)。
+  不写则默认各锚首事件(单进程零负担)。`system_ts` 用 `system_clock`(UTC),建议取未来几秒免初始 burst。
+  ```bash
+  S="2026-06-23 08:00:00"; W="2026-06-25 14:00:00"   # 共享:数据窗 + 发令墙钟
+  mdreplay --kind book  --output.path /shm_book  --realtime 1 --anchor.data_ts "$S" --anchor.system_ts "$W" &
+  mdreplay --kind trade --output.path /shm_trade --realtime 1 --anchor.data_ts "$S" --anchor.system_ts "$W" &
+  ```
 - **优雅退出**:`SIGINT`(Ctrl-C)/ `SIGTERM` → 在干净边界停止回放、跑完收尾汇总(`done` + 跳过明细)、
   退出码 0(而非被硬杀的 130、丢失汇总)。`realtime>0` 的长 pacing 间隔也能在 ≤100ms 内响应中断。
 - **广播环不背压**:`shm` 的 trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量
