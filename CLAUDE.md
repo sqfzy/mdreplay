@@ -18,7 +18,10 @@ xmake 工程,C++23,`src/` **全 header-only**(几乎全是 `.hpp`,仅 `main.cpp`
 cd mdreplay
 xmake build mdreplay                          # 主程序
 xmake build test && xmake run test            # 单元 + e2e 测试(无框架,任一断言失败退出非零)
+bash mem_check.sh                             # 内存回归守门(操作级:跑二进制采 RssAnon,验流式不随数据量涨)
 ```
+
+- **两层测试**:`xmake run test`(`test_main.cpp`,纯逻辑单元 + e2e,进程内);`mem_check.sh`(操作级,跑二进制读 `/proc` 采峰值 `RssAnon`,守住「~0MB 已提交堆与数据量无关」这一核心卖点——纯逻辑单测够不到进程级内存)。改输入加载/缓冲策略后务必跑后者。
 
 - 产物路径:`build/linux/x86_64/release/mdreplay`。
 - 依赖:`spdlog` 走系统 pkg-config(`{system = true}`);`toml++` / `nlohmann_json` 由 xmake 包管理拉取。**无静态库 target、无 vendored 解析器**。
@@ -73,4 +76,4 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 5. **shm attach 自校验**:`create=false` 连既有段时比对 magic/version/entry_size/capacity/schema_hash(`SchemaDrift` 容忍,其余拒启动)。`create=true` 走 `O_TRUNC` 清零重建(幂等)。
 6. **gconf 是 vendored 契约,别外伸**:符号表 / 段布局全来自 `gconf/include/`(已拷进本项目保独立)。symbol→gid 用 `gconf::sym::kNames`,非 subset 符号计数跳过。需要新段类型时优先看 `gconf/include/gconf/shm/v2/`,别去引用父仓库 `cpp/` 的任何东西。5 档的 `DepthBoard`/`DepthSlot`(`depth_board.h`)就是这样新增的段:同 `SegKind::Board`,靠 `entry_size`(128B)+ 独立 `kDepthBoardSchemaHash` 与 BBO `Board` 区分。
 7. **book 档数只 1 或 5、自动识别、不截断**:由输入(csv 表头 / json 每行键)判定,`level0` 列名不带后缀(= 旧 BBO,零迁移),`_1.._4` 为高档;残缺或 >5 → 拒绝,绝不悄悄用部分档。5 档全档共用单一 `price_scale`/`qty_scale`(对齐 `DepthSlot`)。改档相关逻辑务必同步 input 判定 / Record 数组 / 三个 output sink / `DepthBoard` 五处。
-8. **流式逐行读,峰值内存与文件大小/总行数无关**:`StreamingCsvSource`/`StreamingJsonSource` 各持一个常开 `ifstream`、`advance()` 才解析下一行、只缓冲 1 条 → 实测 266MB 输入仅 ~0MB 已提交堆。**多天数据全放一目录、单次连续回放不 OOM**(一个连续时钟、跨天 realtime 节奏无缝);随**文件数**线性涨的只有文件句柄(受 `ulimit -n`,>1000 文件时 `ulimit -n 4096`)。**别**把"整文件入 vector / 攒进容器再回放"加回来——那会让内存回到 O(总行数),正是流式改造要消灭的。CSV 用手写解析而非 csv-parser 也是为此(后者每 reader ~5MB 堆 × N)。
+8. **流式逐行读,峰值内存与文件大小/总行数无关**:`StreamingCsvSource`/`StreamingJsonSource` 各持一个常开 `ifstream`、`advance()` 才解析下一行、只缓冲 1 条 → 实测 266MB 输入仅 ~0MB 已提交堆。**多天数据全放一目录、单次连续回放不 OOM**(一个连续时钟、跨天 realtime 节奏无缝);随**文件数**线性涨的只有文件句柄(受 `ulimit -n`,>1000 文件时 `ulimit -n 4096`)。**别**把"整文件入 vector / 攒进容器再回放"加回来——那会让内存回到 O(总行数),正是流式改造要消灭的。CSV 用手写解析而非 csv-parser 也是为此(后者每 reader ~5MB 堆 × N)。**`mem_check.sh` 守这条铁律**:跑 1× vs 3× 数据采 `RssAnon`,涨了就红;改加载/缓冲后必跑。
