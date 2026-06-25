@@ -2,6 +2,9 @@
 // 极简断言式(无框架,同 cpp 工程 test_core 风格);任一失败返回非零。
 
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -16,6 +19,7 @@
 
 #include "core/clock.hpp"
 #include "core/config.hpp"
+#include "core/signal.hpp"
 #include "core/fixed.hpp"
 #include "core/merge.hpp"
 #include "core/record.hpp"
@@ -107,17 +111,42 @@ static void test_clock() {
   Clock c0(0.0);
   CHECK(c0.offset_ns(123) == 0);  // realtime 0 + 未锚定 → 0
 
+  std::atomic<bool> never{false};
   Clock c(1.0);
   CHECK(!c.anchored());
-  c.pace_to(1000);  // realtime=1 但首拍只锚定、立即返回
+  c.pace_to(1000, never);  // realtime=1 但首拍只锚定、立即返回
   CHECK(c.anchored());
   CHECK(c.offset_ns(1000) == 0);     // 锚点本身偏移 0
   CHECK(c.offset_ns(2000) == 1000);  // 绝对量:(2000-1000)×1.0
   CHECK(c.offset_ns(5000) == 4000);  // 不累积漂移,仍按绝对差
 
   Clock h(0.5);
-  h.pace_to(0);
+  h.pace_to(0, never);
   CHECK(h.offset_ns(1000) == 500);  // 0.5× 延迟 → 2× 实时
+}
+
+// 优雅退出:信号→标志 + pacing 可被 stop 立即打断(否则长间隔下 Ctrl-C 要等满间隔)。
+static void test_signal() {
+  using namespace mdreplay;
+  using namespace std::chrono;
+
+  g_stop_requested.store(false);
+  install_signal_handlers();
+  std::raise(SIGINT);   // 已装处理器 → 置标志而非终止进程
+  CHECK(stop_requested());
+  g_stop_requested.store(false);
+  std::raise(SIGTERM);
+  CHECK(stop_requested());
+
+  // stop=true 时,pace_to 对"很久以后"的事件应立即返回(不睡满)。
+  std::atomic<bool> stop{true};
+  Clock             c(1.0);
+  c.pace_to(0, stop);                       // 锚定
+  const auto t0 = steady_clock::now();
+  c.pace_to(10'000'000'000, stop);          // 10s 后的事件,但 stop=true → 立即返回
+  CHECK(steady_clock::now() - t0 < milliseconds(200));
+
+  g_stop_requested.store(false);            // 复位,免污染后续测试
 }
 
 static void test_merge() {
@@ -585,6 +614,7 @@ int main() {
   test_book_depth_of();
   test_degenerate_files();
   test_clock();
+  test_signal();
   test_merge();
   test_config();
   test_e2e();
