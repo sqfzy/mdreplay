@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <charconv>
 #include <cstdint>
 #include <expected>
 #include <fstream>
@@ -68,7 +69,19 @@ private:
           skips_->add(SkipReason::BadField);
           return std::nullopt;
         }
-        const auto        upd   = j.at("update_id").get<std::uint64_t>();  // 缺失 → 异常 → BadField
+        // update_id 容忍数字或字符串(book json 的 px/qty 本就是字符串,上游极可能也把它写成串)。
+        const auto&   uidv = j.at("update_id");  // 缺失 → 异常 → BadField(下方 catch)
+        std::uint64_t upd  = 0;
+        if (uidv.is_string()) {
+          const std::string& us = uidv.get_ref<const std::string&>();
+          const auto [p, ec] = std::from_chars(us.data(), us.data() + us.size(), upd);
+          if (ec != std::errc{} || p != us.data() + us.size()) {
+            skips_->add(SkipReason::BadField);  // 字符串非纯数字
+            return std::nullopt;
+          }
+        } else {
+          upd = uidv.get<std::uint64_t>();  // 数字;非数字类型 → json 异常 → BadField
+        }
         const std::size_t depth = *d;
         for (std::size_t k = 0; k < depth; ++k) {
           const std::string s = (k == 0) ? "" : "_" + std::to_string(k);

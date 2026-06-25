@@ -104,16 +104,29 @@ class BookSink : public Sink {
 public:
   explicit BookSink(gconf::shm::v2::BookTickBoard* board) : board_(board) {}
   Result<void> write(const Record& r) override {
-    std::uint64_t replaced_old = 0;
+    std::uint64_t replaced_old = 0;  // claim_if_newer 出参:被替换的旧 uid;单写者回放用不到
     if (board_->claim_if_newer(r.gid, r.update_id, replaced_old))  // r.gid 即 LID
       board_->slot[r.gid].write(r.ts_ns, r.update_id, r.bid_px[0], r.bid_qty[0], r.ask_px[0],
                                 r.ask_qty[0], 0, 0, 0,  // kernel/shm/E 延迟:回放无
                                 r.gid, r.price_scale, r.qty_scale, 0 /*path_idx*/);
+    else
+      ++deduped_;  // update_id ≤ 该 LID 已记录(非递增)→ **未写段**。clean 回放数据恒 0
     return {};
   }
 
+  // 回放结束:若有非递增 update_id 被去重丢弃,告警——回放数据每 symbol 的 update_id 本应单调,
+  // >0 说明输入 update_id 有重复/倒退(段里少了记录,而 `done` 计数把它们也算了 → 这里补可观测)。
+  void on_finish() override {
+    if (deduped_ > 0)
+      spdlog::warn("book: {} 条 update_id 非递增(≤已记录)被 claim_if_newer 去重、**未写入段**;"
+                   "回放 update_id 本应每 symbol 单调,请检查输入是否有重复/倒退序号", deduped_);
+  }
+
+  [[nodiscard]] std::uint64_t deduped() const noexcept { return deduped_; }
+
 private:
   gconf::shm::v2::BookTickBoard* board_;
+  std::uint64_t                 deduped_{0};
 };
 
 class TradeSink : public Sink {

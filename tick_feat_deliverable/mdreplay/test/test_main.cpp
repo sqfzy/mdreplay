@@ -248,6 +248,7 @@ static void test_e2e() {
     Record stale = r; stale.update_id = 100; stale.bid_px[0] = 9999;
     CHECK(sink.write(stale).has_value());
     CHECK(board->slot[19].read(out) && out.update_id == 555 && out.bid_px == 6884);  // 仍是新版
+    CHECK(sink.deduped() == 1);  // 非递增 update_id 被去重、计入 deduped(可观测,而非静默)
   }
   // trade sink → Ring drain
   {
@@ -519,15 +520,15 @@ static void test_json_depth5() {
            R"("bid_px_2":"1","bid_qty_2":"1","ask_px_2":"1","ask_qty_2":"1",)"
            R"("bid_px_3":"1","bid_qty_3":"1","ask_px_3":"1","ask_qty_3":"1",)"
            R"("bid_px_4":"1","bid_qty_4":"1","ask_px_4":"1","ask_qty_4":"1"})" << "\n";
-      o << R"({"ts":2,"symbol":"SOLUSDT","update_id":12,"bid_px":"2","bid_qty":"2","ask_px":"2","ask_qty":"2"})" << "\n"; }
+      o << R"({"ts":2,"symbol":"SOLUSDT","update_id":"12","bid_px":"2","bid_qty":"2","ask_px":"2","ask_qty":"2"})" << "\n"; }  // update_id 字符串型(容忍)
     SkipStats  sk;
     const auto src = load_json_source(p, Kind::Book, sk);
     CHECK(src.has_value() && sk.total() == 0);
     const Record* r0 = src.has_value() ? (*src)->peek() : nullptr;
-    CHECK(r0 && r0->ts_ns == 1 && r0->depth == 5 && r0->update_id == 11);
+    CHECK(r0 && r0->ts_ns == 1 && r0->depth == 5 && r0->update_id == 11);  // 数字型
     if (src.has_value()) (*src)->advance();
     const Record* r1 = src.has_value() ? (*src)->peek() : nullptr;
-    CHECK(r1 && r1->ts_ns == 2 && r1->depth == 1 && r1->update_id == 12);
+    CHECK(r1 && r1->ts_ns == 2 && r1->depth == 1 && r1->update_id == 12);  // 字符串型 "12" → 12
   }
   fs::remove_all(dir);
 }
