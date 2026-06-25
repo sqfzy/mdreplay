@@ -100,7 +100,7 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& fiel
 struct CsvCols {
   std::size_t                        ts = 0, symbol = 0;
   std::size_t                        side = 0, px = 0, qty = 0;  // trade
-  std::size_t                        depth = 0;                  // book(1 或 5)
+  std::size_t                        depth = 0, update_id = 0;   // book(档数 + 更新序号列)
   std::array<std::size_t, kMaxDepth> bid_px{}, bid_qty{}, ask_px{}, ask_qty{};
 };
 
@@ -117,6 +117,9 @@ struct CsvCols {
   c.ts = *ts;
   c.symbol = *sym;
   if (kind == Kind::Book) {
+    const auto uid = idx("update_id");  // book 段 BookTickBoard 需交易所更新序号真值
+    if (!uid) return std::unexpected(Error::CsvSchema);
+    c.update_id = *uid;
     const auto present = [&](std::size_t k) { return idx("bid_px_" + std::to_string(k)).has_value(); };
     const auto depth   = book_depth_of(present);
     if (!depth) return std::unexpected(Error::BookDepthUnsupported);  // 残缺/>5 档,自描述报错在 load_csv_source
@@ -164,11 +167,13 @@ private:
     const auto sym = fields_[cols_.symbol];
     std::expected<Record, SkipReason> rec = std::unexpected(SkipReason::BadField);  // 默认:side 坏
     if (kind_ == Kind::Book) {
+      const auto uid = detail::to_i64(fields_[cols_.update_id]);  // 交易所更新序号(非负整数)
+      if (!uid || *uid < 0) { skips_->add(SkipReason::BadField); return std::nullopt; }
       for (std::size_t k = 0; k < cols_.depth; ++k) {
         bpx_[k] = fields_[cols_.bid_px[k]];  bqty_[k] = fields_[cols_.bid_qty[k]];
         apx_[k] = fields_[cols_.ask_px[k]];  aqty_[k] = fields_[cols_.ask_qty[k]];
       }
-      rec = make_book_record(*ts, sym, std::span(bpx_).first(cols_.depth),
+      rec = make_book_record(*ts, static_cast<std::uint64_t>(*uid), sym, std::span(bpx_).first(cols_.depth),
                              std::span(bqty_).first(cols_.depth), std::span(apx_).first(cols_.depth),
                              std::span(aqty_).first(cols_.depth));
     } else if (const auto side = detail::to_i64(fields_[cols_.side])) {

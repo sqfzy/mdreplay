@@ -17,10 +17,9 @@ end   = ""                 # 时间窗止(留空=最晚),闭区间
 # 两端都收 UTC datetime("YYYY-MM-DD HH:MM:SS")或裸 epoch ns;system_ts 建议取未来,免初始 burst。
 # anchor = { data_ts = "2026-06-23 08:00:00", system_ts = "2026-06-25 14:00:00" }
 
-[output]
-format = "shm"             # shm | csv | json —— 去向
-path   = "/shm_bybit_lin_book_v2"   # 去向定位:shm=段名(/开头);csv|json=输出文件路径(如 out.book.csv)
-create = true                       # 仅 format=shm:建段(O_TRUNC 幂等)/ false=attach
+[output]                            # 输出恒为 gconf v1.2.2 shm 段(book→BookTickBoard、trade→TradeRing)
+path   = "/shm_bybit_lin_book_tick" # shm 段名(/开头)
+create = true                       # 建段(O_TRUNC 幂等)/ false=attach
 
 # 注:精度不在此规定 —— mdreplay 沿用输入数据本身的小数位推出 price_scale/qty_scale。
 
