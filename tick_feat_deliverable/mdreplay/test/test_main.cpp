@@ -24,6 +24,7 @@
 #include "core/merge.hpp"
 #include "core/record.hpp"
 #include "input/csv.hpp"
+#include "input/discover.hpp"
 #include "input/json.hpp"
 #include "input/source.hpp"
 #include "output/csv.hpp"
@@ -437,7 +438,7 @@ static void test_book_depth5() {
     const Record* r = src.has_value() ? (*src)->peek() : nullptr;
     CHECK(r && r->depth == 1 && r->bid_px[0] == 1);
   }
-  // 残缺档(只到 _2,缺 _3/_4)→ 既非 1 也非 5 → 整文件 CsvSchema 拒绝(不截断)
+  // 残缺档(只到 _2,缺 _3/_4)→ 既非 1 也非 5 → 整文件拒绝(不截断),错误类型 BookDepthUnsupported(自描述)
   {
     const std::string p2 = dir + "/partial.book.csv";
     { std::ofstream o(p2);
@@ -445,7 +446,8 @@ static void test_book_depth5() {
            "bid_px_2,bid_qty_2,ask_px_2,ask_qty_2\n1,SOLUSDT,1,1,1,1,1,1,1,1,1,1,1,1\n"; }
     SkipStats  sk;
     const auto src = load_csv_source(p2, Kind::Book, sk);
-    CHECK(!src.has_value());  // 部分档 → 拒绝
+    CHECK(!src.has_value());
+    CHECK(!src.has_value() && src.error() == Error::BookDepthUnsupported);  // 区别于缺列的 CsvSchema
   }
   // csv 5 档往返:写出(显式 5 档表头)再读回(自动识别 5),逐档一致
   {
@@ -462,6 +464,37 @@ static void test_book_depth5() {
     CHECK(src.has_value() && sk.total() == 0);
     const Record* r = src.has_value() ? (*src)->peek() : nullptr;
     CHECK(r && r->depth == 5 && r->bid_px[3] == 6881 && r->ask_qty[2] == 22);
+  }
+  fs::remove_all(dir);
+}
+
+// format=auto:目录里只一种格式 → 识别;两种并存或都没有 → nullopt(自描述报错由 detect 内部打)。
+static void test_format_auto() {
+  using namespace mdreplay;
+  namespace fs = std::filesystem;
+  const std::string dir = "test_tmp_auto";
+  fs::create_directories(dir);
+  const auto write = [&](const std::string& name, const char* body) {
+    std::ofstream o(dir + "/" + name);
+    o << body;
+  };
+
+  // 仅 csv → 识别 csv
+  write("a.book.csv", "ts,symbol,bid_px,bid_qty,ask_px,ask_qty\n1,SOLUSDT,1,1,1,1\n");
+  {
+    const auto f = detect_input_format(dir, Kind::Book);
+    CHECK(f.has_value() && *f == "csv");
+  }
+  // 加一个 json → csv/json 并存 → 歧义,nullopt
+  write("a.book.json", "{\"ts\":1,\"symbol\":\"SOLUSDT\",\"bid_px\":\"1\",\"bid_qty\":\"1\",\"ask_px\":\"1\",\"ask_qty\":\"1\"}\n");
+  CHECK(!detect_input_format(dir, Kind::Book).has_value());
+  // trade 这个 kind 一个文件都没有 → nullopt
+  CHECK(!detect_input_format(dir, Kind::Trade).has_value());
+  // 删掉 csv,只剩 json → 识别 json
+  fs::remove(dir + "/a.book.csv");
+  {
+    const auto f = detect_input_format(dir, Kind::Book);
+    CHECK(f.has_value() && *f == "json");
   }
   fs::remove_all(dir);
 }
@@ -622,6 +655,7 @@ int main() {
   test_csv_quoting();
   test_skip_reasons();
   test_book_depth5();
+  test_format_auto();
   test_depth_shm();
   test_json_depth5();
   test_overflow_and_badvalue();

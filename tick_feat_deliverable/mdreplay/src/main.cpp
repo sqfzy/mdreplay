@@ -46,7 +46,7 @@ void print_usage() {
       "mdreplay — 单入单出记录回放(任意格式 → shm/csv/json)。选项覆盖 config.toml 同名项。\n"
       "一次只回放一种(book 或 trade);两者都要就跑两遍(改 --kind 与 --output.*)。\n"
       "  --config <path>                 配置文件(默认 config.toml)\n"
-      "  --format <csv|json>             输入文件格式 (input.format)\n"
+      "  --format <csv|json|auto>        输入文件格式;auto=扫目录自动识别 (input.format)\n"
       "  --dir <dir>                     输入目录 (input.dir)\n"
       "  --kind <book|trade>             记录类型 (input.kind)\n"
       "  --realtime <0~1>                节奏:1=原速,0.5=2×,0=尽快可复现\n"
@@ -168,8 +168,9 @@ void print_usage() {
     return std::nullopt;
   }
   if (cfg->start_ns > cfg->end_ns) { spdlog::error("start > end"); return std::nullopt; }
-  if (cfg->input_format != "csv" && cfg->input_format != "json") {
-    spdlog::error("input.format 须 csv/json(得到 '{}')", cfg->input_format);
+  if (cfg->input_format != "csv" && cfg->input_format != "json" && cfg->input_format != "auto") {
+    spdlog::error("input.format='{}' 不受支持。mdreplay 只解析 csv / json,或 auto 自动识别;"
+                  "不支持 parquet 等其它格式。", cfg->input_format);
     return std::nullopt;
   }
   if (cfg->input_kind != "book" && cfg->input_kind != "trade") {
@@ -292,6 +293,14 @@ int main(int argc, char** argv) {
   spdlog::set_level(*lvl);
 
   const Kind kind = (cfg->input_kind == "book") ? Kind::Book : Kind::Trade;
+
+  // format=auto:扫目录自动识别 csv/json(失败时 detect 已自描述报错)。识别后落为具体格式再往下走。
+  if (cfg->input_format == "auto") {
+    const auto fmt = mdreplay::detect_input_format(cfg->dir, kind);
+    if (!fmt) return 1;
+    cfg->input_format = *fmt;
+    spdlog::info("input.format=auto → 识别为 {}", cfg->input_format);
+  }
 
   // 文件输出无节奏意义:忽略 realtime,按尽快回放(避免原速写文件白等)。
   if (cfg->output.format != "shm" && cfg->realtime > 0.0) {

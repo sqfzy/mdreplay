@@ -17,6 +17,7 @@ enum class Error {
   OutputOpen,     // 输出文件打不开(csv/json sink)
   CsvParse,       // CSV 单行数值解析失败
   CsvSchema,      // CSV 表头缺必需列
+  BookDepthUnsupported,  // book 档数既非 1 也非 5(自适应只接受这两种,不截断)
   ShmOpen,        // shm_open / ftruncate / mmap 失败
   SegMismatch,    // attach 既有段时 seg_check 不符(magic/version/abi)
   ScaleOverflow,  // value×10^scale 越 u32 上限
@@ -35,6 +36,7 @@ using Result = std::expected<T, Error>;
     case Error::OutputOpen:    return "output file open failed";
     case Error::CsvParse:      return "csv row parse error";
     case Error::CsvSchema:     return "csv header missing required column";
+    case Error::BookDepthUnsupported: return "book 档数不受支持(只支持 1 档 BBO 或 5 档,不截断)";
     case Error::ShmOpen:       return "shm open/mmap failed";
     case Error::SegMismatch:   return "segment header check mismatch";
     case Error::ScaleOverflow: return "value*10^scale overflows u32";
