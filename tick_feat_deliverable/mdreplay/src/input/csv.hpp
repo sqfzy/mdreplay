@@ -44,6 +44,14 @@ namespace detail {
   return v;
 }
 
+// 同上,无符号(用于 update_id —— 语义 u64;from_chars 对 u64 天然拒负数)。
+[[nodiscard]] inline std::optional<std::uint64_t> to_u64(std::string_view s) {
+  std::uint64_t v{};
+  const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+  if (ec != std::errc{} || p != s.data() + s.size()) return std::nullopt;
+  return v;
+}
+
 // 读一个引号字段(line[i]=='"'):去引号、`""`→`"`,推进 i 到字段末逗号/行尾,返回去引号内容。
 [[nodiscard]] inline std::string read_quoted_field(std::string_view line, std::size_t& i) {
   const std::size_t n = line.size();
@@ -167,13 +175,13 @@ private:
     const auto sym = fields_[cols_.symbol];
     std::expected<Record, SkipReason> rec = std::unexpected(SkipReason::BadField);  // 默认:side 坏
     if (kind_ == Kind::Book) {
-      const auto uid = detail::to_i64(fields_[cols_.update_id]);  // 交易所更新序号(非负整数)
-      if (!uid || *uid < 0) { skips_->add(SkipReason::BadField); return std::nullopt; }
+      const auto uid = detail::to_u64(fields_[cols_.update_id]);  // 交易所更新序号(u64,from_chars 拒负数)
+      if (!uid) { skips_->add(SkipReason::BadField); return std::nullopt; }
       for (std::size_t k = 0; k < cols_.depth; ++k) {
         bpx_[k] = fields_[cols_.bid_px[k]];  bqty_[k] = fields_[cols_.bid_qty[k]];
         apx_[k] = fields_[cols_.ask_px[k]];  aqty_[k] = fields_[cols_.ask_qty[k]];
       }
-      rec = make_book_record(*ts, static_cast<std::uint64_t>(*uid), sym, std::span(bpx_).first(cols_.depth),
+      rec = make_book_record(*ts, *uid, sym, std::span(bpx_).first(cols_.depth),
                              std::span(bqty_).first(cols_.depth), std::span(apx_).first(cols_.depth),
                              std::span(aqty_).first(cols_.depth));
     } else if (const auto side = detail::to_i64(fields_[cols_.side])) {

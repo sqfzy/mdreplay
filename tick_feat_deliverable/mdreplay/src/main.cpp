@@ -235,8 +235,8 @@ struct Output {
   return Output{std::move(*seg), std::make_unique<mdreplay::TradeSink>(ring)};
 }
 
-// 从已载入的源头探测档数(book 自动识别后写进 Record.depth):取首个非空源的首条记录定档;
-// 若各源首记录档数不一致 → WARN(输出按首源档数,混档会产出不一致)。无记录 → 默认 1。
+// 探测输入档数(仅供启动日志:告知输入是 1 还是 5 档——book 输出恒取 L0 BBO,档数不再选段)。
+// 取首个非空源的首条记录档数;各源不一致 → WARN(纯提示,不影响 BBO 输出)。无记录 → 默认 1。
 [[nodiscard]] std::size_t detect_depth(const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
   std::size_t depth = 1;
   bool        found = false;
@@ -245,8 +245,8 @@ struct Output {
     if (!r) continue;
     if (!found) { depth = r->depth; found = true; }
     else if (r->depth != depth)
-      spdlog::warn("源间档数不一致(首源 {} 档,另有 {} 档);输出按 {} 档,混档输出可能不一致",
-                   depth, r->depth, depth);
+      spdlog::warn("源间输入档数不一致(首源 {} 档,另有 {} 档);book 输出恒取 L0 BBO,不受影响",
+                   depth, r->depth);
   }
   return depth;
 }
