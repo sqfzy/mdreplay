@@ -34,8 +34,11 @@ input/<fmt>   →   core(归并 + 节奏)   →   output/<dest>
 | book(5 档) | 上面 + `bid_px_1..4, bid_qty_1..4, ask_px_1..4, ask_qty_1..4`(level0 不带后缀) |
 | trade | `ts, symbol, side, px, qty` |
 
+- **输入格式 `csv` / `json` / `auto`**:`auto` 扫目录自动识别(仅一种格式时);两种并存或都没有 → **自描述
+  报错**(说明只支持 csv/json、该怎么办),不让你干瞪眼。`--format parquet` 等能力外格式同样自描述拒绝。
 - **book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键 → 1 档;`_1.._4` 齐全且无 `_5` → 5 档;
-  残缺(部分档)或 >5 档 → 拒绝(csv 拒整文件 / json 跳该行),**绝不截断**。输出档数跟随输入。
+  残缺(部分档)或 >5 档 → 拒绝(csv 拒整文件 / json 跳该行),**绝不截断**;报错会**数出实际档数**
+  (如"档数 100 不受支持")并告知支持范围。输出档数跟随输入。
 - `ts` = epoch **纳秒**(= gconf `exch_ns`)。
 - `symbol` = 字符串,经 gconf `symbols.h` 映射 `global_symbol_id`;非 subset 符号计数跳过。
 - `side`(trade)= `0` buy / `1` sell。
@@ -51,7 +54,7 @@ input/<fmt>   →   core(归并 + 节奏)   →   output/<dest>
 
 ```toml
 [input]
-format = "csv"      # csv | json —— 输入文件格式
+format = "csv"      # csv | json | auto —— 输入文件格式(auto=扫目录自动识别)
 dir    = "datas"
 kind   = "book"     # book | trade —— 一次只回放一种
 

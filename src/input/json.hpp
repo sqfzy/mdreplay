@@ -27,8 +27,8 @@ namespace mdreplay {
 // 峰值内存 O(1 条 + 一行)。book 档数逐行自动识别(只 1 或满 5,残缺/>5 → BadField 跳该行,不截断)。
 class StreamingJsonSource : public Source {
 public:
-  StreamingJsonSource(std::ifstream f, Kind kind, SkipStats& skips)
-      : f_(std::move(f)), kind_(kind), skips_(&skips) {
+  StreamingJsonSource(std::ifstream f, Kind kind, SkipStats& skips, std::string path)
+      : f_(std::move(f)), kind_(kind), skips_(&skips), path_(std::move(path)) {
     advance();  // 预读首条进 head_
   }
 
@@ -56,8 +56,18 @@ private:
       const auto ts = j.at("ts").get<std::int64_t>();
       sym           = j.at("symbol").get<std::string>();
       if (kind_ == Kind::Book) {
-        const auto d = book_depth_of([&](std::size_t k) { return j.contains("bid_px_" + std::to_string(k)); });
-        if (!d) { skips_->add(SkipReason::BadField); return std::nullopt; }  // 残缺/>5 档
+        const auto present = [&](std::size_t k) { return j.contains("bid_px_" + std::to_string(k)); };
+        const auto d       = book_depth_of(present);
+        if (!d) {  // 残缺/>5 档:自描述告知一次(json 逐行,避免每行刷屏),仍按 BadField 跳该行
+          if (!depth_warned_) {
+            const std::size_t got = highest_book_level(present) + 1;
+            spdlog::warn("json '{}': book 档数 {} 不受支持(只支持 1 档 BBO 或 5 档,不截断);该类行将按坏行跳过",
+                         path_, got);
+            depth_warned_ = true;
+          }
+          skips_->add(SkipReason::BadField);
+          return std::nullopt;
+        }
         const std::size_t depth = *d;
         for (std::size_t k = 0; k < depth; ++k) {
           const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
@@ -83,6 +93,8 @@ private:
   std::ifstream         f_;
   Kind                  kind_;
   SkipStats*            skips_;
+  std::string           path_;               // 仅供报错定位
+  bool                  depth_warned_{false};  // 档数不支持只自描述告知一次,免逐行刷屏
   std::string           line_;  // 逐 advance 复用
   std::optional<Record> head_;
   std::array<std::string, kMaxDepth>      sbpx_, sbqty_, sapx_, saqty_;  // 持有串(视图指向它们)
@@ -96,7 +108,7 @@ private:
   std::ifstream f(path);
   if (!f) return std::unexpected(Error::FileOpen);
   spdlog::debug("json '{}': 流式载入", path);
-  return std::unique_ptr<Source>{std::make_unique<StreamingJsonSource>(std::move(f), kind, skips)};
+  return std::unique_ptr<Source>{std::make_unique<StreamingJsonSource>(std::move(f), kind, skips, path)};
 }
 
 }  // namespace mdreplay

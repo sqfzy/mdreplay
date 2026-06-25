@@ -35,6 +35,18 @@ template <class MarkerFn>
   return std::nullopt;  // 残缺档 或 >5 档
 }
 
+// 诊断用(仅在 book_depth_of 拒绝后,为自描述报错数出实际档数):返回呈现的最高档号
+// (level0 无后缀记为 0,有 _k 则记最大 k)。探到 kProbeMax 足以区分"100 档"与"1/5 档"。
+// 用最高档号 + 1 即"档数",输入 100 档(有 _1.._99)→ 返回 99 → 报"100 档"。
+template <class MarkerFn>
+[[nodiscard]] inline std::size_t highest_book_level(MarkerFn marker) {
+  constexpr std::size_t kProbeMax = 128;
+  std::size_t           hi = 0;
+  for (std::size_t k = 1; k <= kProbeMax; ++k)
+    if (marker(k)) hi = k;
+  return hi;
+}
+
 // 多档 book:每个 span 含 depth 档(0=最优)。全档价共用 price_scale、全档量共用 qty_scale
 // (把 bid/ask 全档拼成一组编码,对齐 slot 单 scale);depth=1 即退化为 BBO,与旧契约逐字一致。
 [[nodiscard]] inline std::expected<Record, SkipReason> make_book_record(

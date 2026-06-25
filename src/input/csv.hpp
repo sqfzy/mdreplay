@@ -109,8 +109,9 @@ struct CsvCols {
   c.ts = *ts;
   c.symbol = *sym;
   if (kind == Kind::Book) {
-    const auto depth = book_depth_of([&](std::size_t k) { return idx("bid_px_" + std::to_string(k)).has_value(); });
-    if (!depth) return std::unexpected(Error::CsvSchema);  // 残缺档 或 >5 档
+    const auto present = [&](std::size_t k) { return idx("bid_px_" + std::to_string(k)).has_value(); };
+    const auto depth   = book_depth_of(present);
+    if (!depth) return std::unexpected(Error::BookDepthUnsupported);  // 残缺/>5 档,自描述报错在 load_csv_source
     c.depth = *depth;
     for (std::size_t k = 0; k < c.depth; ++k) {
       const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
@@ -199,7 +200,18 @@ private:
   for (const auto v : hviews) names.emplace_back(detail::trim(v));
 
   auto cols = resolve_csv_cols(names, kind);
-  if (!cols) return std::unexpected(cols.error());
+  if (!cols) {
+    if (cols.error() == Error::BookDepthUnsupported) {  // 自描述:数出实际档数 + 告知支持范围
+      const auto idx = [&](std::string_view n) {
+        for (const auto& nm : names) if (nm == n) return true;
+        return false;
+      };
+      const std::size_t got = highest_book_level([&](std::size_t k) { return idx("bid_px_" + std::to_string(k)); }) + 1;
+      spdlog::error("csv '{}': book 档数 {} 不受支持 → 跳过该文件。mdreplay 只接受 1 档(BBO,列 bid_px/...)"
+                    "或 5 档(列 ..._1.._4),不截断、不补齐。", path, got);
+    }
+    return std::unexpected(cols.error());
+  }
 
   spdlog::debug("csv '{}': 流式载入, {} 档", path, cols->depth);
   return std::unique_ptr<Source>{
