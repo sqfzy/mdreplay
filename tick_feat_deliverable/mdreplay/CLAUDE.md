@@ -6,23 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `mdreplay` 是一个**独立、普适**的逐笔行情回放器:读录制的行情文件(csv/json),按时序重放到一个去向(gconf v2 **shm 段** / **csv** / **json** 文件)。主用途是给下游(特征引擎等)当实盘 WS feed 的替身;也可做格式转换 / 落盘 / 调试。
 
-**铁律 — 零上游耦合**:本项目只认「带时间戳的记录流」,**绝不绑任何上游/下游的私有格式或口径**(连 venue 差异、tick_feat 因子口径都在它之外)。它**只依赖** gconf v2 段契约 + csv-parser(均已 vendored:`gconf/`、`third_party/csvparser/`)+ `toml++` / `spdlog` / `nlohmann_json`。改动时若发现自己在写 venue 专属或某下游专属逻辑,基本是放错了地方。
+**铁律 — 零上游耦合**:本项目只认「带时间戳的记录流」,**绝不绑任何上游/下游的私有格式或口径**(连 venue 差异、tick_feat 因子口径都在它之外)。它**只依赖** gconf v2 段契约(vendored 进 `gconf/`)+ `toml++` / `spdlog` / `nlohmann_json`,**CSV 解析手写(`input/csv.hpp`),零第三方解析库**。改动时若发现自己在写 venue 专属或某下游专属逻辑,基本是放错了地方。
 
 > 注:本目录是父仓库 `tick_feat_deliverable/` 的**独立子工程**(git 根在更上层的 `python/`)。父 CLAUDE.md 讲的是 tick_feat 因子复刻,**与本项目算法无关** —— mdreplay 不算因子,只搬运记录。
 
 ## 构建 / 运行 / 测试
 
-xmake 工程,C++23,`src/` 基本 header-only(几乎全是 `.hpp`,仅 `main.cpp` / `test_main.cpp` 是 TU);**例外是 vendored 的 csv-parser,它不是 header-only,由独立的 `csvparser` 静态库 target 编译**(见下)。
+xmake 工程,C++23,`src/` **全 header-only**(几乎全是 `.hpp`,仅 `main.cpp` / `test_main.cpp` 是 TU);**零第三方解析库依赖**。
 
 ```bash
 cd mdreplay
-xmake build mdreplay                          # 主程序(自动先建 csvparser 静态库依赖)
+xmake build mdreplay                          # 主程序
 xmake build test && xmake run test            # 单元 + e2e 测试(无框架,任一断言失败退出非零)
 ```
 
 - 产物路径:`build/linux/x86_64/release/mdreplay`。
-- 依赖:`spdlog` 走系统 pkg-config(`{system = true}`);`toml++` / `nlohmann_json` 由 xmake 包管理拉取;**`csv-parser` 5.3.0 vendor 进 `third_party/csvparser/`,`xmake.lua` 编成 `csvparser` 静态库 target,mdreplay/test 用 `add_deps` 链接**。
-- **csv-parser 不是 header-only(坑)**:xmake-repo 的 `csvparser` 包误标 `headeronly=true`,但 5.3.0 实为多文件需编译(`.hpp` 只声明、定义在 `.cpp`),按 headeronly 用会**链接失败**(undefined reference)。故 vendor 源码 + 自建静态库(编 `third_party/csvparser/include/internal/*.cpp` + `parser/*.cpp`,见上游 `internal/CMakeLists.txt`)。全局 `add_defines("CSV_ENABLE_THREADS=0")`(PUBLIC 宏,须 lib 与消费方一致);头作 `add_sysincludedirs` 引入避免 `-Wextra` 刷屏。CSV 数值仍走 `fixed.hpp` 定点,**不碰 csv-parser 的 double 转换**(保 bit-exact)。
+- 依赖:`spdlog` 走系统 pkg-config(`{system = true}`);`toml++` / `nlohmann_json` 由 xmake 包管理拉取。**无静态库 target、无 vendored 解析器**。
+- **CSV 解析手写(`input/csv.hpp`)**:`getline` + 引号感知切分(RFC4180-lite:`"..."` 包裹/`""` 转义/CRLF,不支持字段内换行)。**为何不用 csv-parser**:其 reader 每实例占 ~5MB 已提交堆,N 路归并同开 N 个 → 内存随**文件数**涨;手写 `ifstream` 逐行读峰值 O(1 行),实测 266MB 输入仅 ~0MB 已提交堆(见铁律 8)。无引号行走零拷贝快路(string_view 直指行缓冲),含引号行去引号到 owned 缓冲。CSV 数值走 `fixed.hpp` 定点,**不碰 double**(保 bit-exact)。曾用 csv-parser 5.3.0,因上述内存问题于流式改造时移除(实测手写解析对 csv-parser 全路径逐字节一致)。
 - **单测无 per-test 过滤**:`test/test_main.cpp` 是单一二进制,`main()` 顺序调 `test_fixed` / `test_clock` / `test_merge` / `test_config` / `test_e2e` / `test_file_io` / `test_csv_quoting` / `test_skip_reasons` / `test_book_depth5`。要只跑一个,临时在 `main()` 注释掉其余调用(别引入测试框架,保持同 cpp 工程 `test_core` 的极简风格)。
 
 ```bash
@@ -52,7 +52,7 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 
 **`Record`(`core/record.hpp`)是三段解耦的命脉** —— 格式无关的中间语:输入 seam 产出它、输出 seam 消费它、核心只搬运它。价/量以**定点 mantissa(`uint32 ×10^scale`)**承载,**绝不走 double**;精度沿用数据本身(由字符串小数位推得)。book 携带 `depth`(1 或 5)+ `bid/ask_px/qty` 为 `array<u32, kMaxDepth=5>`(0=最优档);**全档共用单一 `price_scale`/`qty_scale`**。`depth=1` 即 BBO,与旧契约逐字一致。
 
-- **`input/`**:按格式可插拔的解析器。`discover.hpp` 扫目录挑 `*.<kind>.<fmt>` 并**按路径排序**(固定源序 = 确定性归并的基础);`csv.hpp`(走 vendored csv-parser)/ `json.hpp` 表头/字段驱动解析,**都把记录灌进同一个 `LoadedSource`**(`source.hpp` 的 `peek/advance` 游标契约);`record_build.hpp` 是 csv/json **共用**的「字段串 → Record」逻辑(symbol→gid + fixed 编码,失败返回**分类的** `SkipReason`)。**book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键→1;`_1.._4` 齐且无 `_5`→5;残缺/>5→拒(csv 拒整文件 / json 跳行),**绝不截断**。**加一种输入格式 = 加一个文件 + 在 main 的 `load_sources` 分叉一行**。
+- **`input/`**:按格式可插拔的**流式**解析器。`discover.hpp` 扫目录挑 `*.<kind>.<fmt>` 并**按路径排序**(固定源序 = 确定性归并的基础);`csv.hpp`(手写 getline+切分)/ `json.hpp`(nlohmann)表头/字段驱动解析,**各自实现 `Source`**(`StreamingCsvSource`/`StreamingJsonSource`,`source.hpp` 的 `peek/advance` 游标契约)——`advance()` 才惰性读下一行、**只缓冲 1 条**,峰值内存与文件大小无关;`record_build.hpp` 是 csv/json **共用**的「字段串 → Record」逻辑(symbol→gid + fixed 编码,失败返回**分类的** `SkipReason`)。坏/未知行在**消费期**(advance)按原因归账到 `SkipStats`(故 `main` 的 `log_summary` 在 replay 后打)。**book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键→1;`_1.._4` 齐且无 `_5`→5;残缺/>5→拒(csv 拒整文件 / json 跳行),**绝不截断**。**加一种输入格式 = 加一个文件 + 在 main 的 `load_sources` 分叉一行**。
 - **`core/`**:格式无关回放核心。`merge.hpp` 用小顶堆做 N 路归并,序 = `(ts_ns, 源序)` 稳定 tiebreak(**通用规则,不含任何 venue 口径**);`clock.hpp` 绝对虚拟时钟(延迟 = `(ts - ts0) × realtime`,锚定首事件**不累积漂移**);`window.hpp` 时间窗 sentinel(`kNoStart/kNoEnd`);`fixed.hpp` 定点编解码;`skip.hpp` 跳过分原因统计(`SkipStats`:per-reason 计数 + 未知符号去重采样,结束 `log_summary` 打分类汇总 + WARN);`config.hpp` toml 解析 + 启动期校验;`report.hpp` 进度观测。
 - **`output/`**:按去向的编码器,统一 `Sink::write(Record)` 接口(`sink.hpp`)。`shm.hpp` 含 `ShmSegment`(POSIX shm RAII + 建段写头/连段自校验)+ `BookSink`(写 BBO `Board.slot[gid]` 的最优档,latest-wins)+ `DepthBookSink`(写 5 档 `DepthBoard.slot[gid]`)+ `TradeSink`(`TradeRing.publish`,无损广播环);`csv.hpp` / `json.hpp` 文件输出(按 `record.depth` 逐档,经 `fixed.hpp::to_decimal` 还原精度)。`main::open_output` 据**探测到的档数**选 `Board`(1)/`DepthBoard`(5)。**加一种去向 = 加一个 Sink + 在 main 的 `open_output` 分支**。
 
@@ -71,3 +71,4 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 5. **shm attach 自校验**:`create=false` 连既有段时比对 magic/version/entry_size/capacity/schema_hash(`SchemaDrift` 容忍,其余拒启动)。`create=true` 走 `O_TRUNC` 清零重建(幂等)。
 6. **gconf 是 vendored 契约,别外伸**:符号表 / 段布局全来自 `gconf/include/`(已拷进本项目保独立)。symbol→gid 用 `gconf::sym::kNames`,非 subset 符号计数跳过。需要新段类型时优先看 `gconf/include/gconf/shm/v2/`,别去引用父仓库 `cpp/` 的任何东西。5 档的 `DepthBoard`/`DepthSlot`(`depth_board.h`)就是这样新增的段:同 `SegKind::Board`,靠 `entry_size`(128B)+ 独立 `kDepthBoardSchemaHash` 与 BBO `Board` 区分。
 7. **book 档数只 1 或 5、自动识别、不截断**:由输入(csv 表头 / json 每行键)判定,`level0` 列名不带后缀(= 旧 BBO,零迁移),`_1.._4` 为高档;残缺或 >5 → 拒绝,绝不悄悄用部分档。5 档全档共用单一 `price_scale`/`qty_scale`(对齐 `DepthSlot`)。改档相关逻辑务必同步 input 判定 / Record 数组 / 三个 output sink / `DepthBoard` 五处。
+8. **流式逐行读,峰值内存与文件大小/总行数无关**:`StreamingCsvSource`/`StreamingJsonSource` 各持一个常开 `ifstream`、`advance()` 才解析下一行、只缓冲 1 条 → 实测 266MB 输入仅 ~0MB 已提交堆。**多天数据全放一目录、单次连续回放不 OOM**(一个连续时钟、跨天 realtime 节奏无缝);随**文件数**线性涨的只有文件句柄(受 `ulimit -n`,>1000 文件时 `ulimit -n 4096`)。**别**把"整文件入 vector / 攒进容器再回放"加回来——那会让内存回到 O(总行数),正是流式改造要消灭的。CSV 用手写解析而非 csv-parser 也是为此(后者每 reader ~5MB 堆 × N)。
