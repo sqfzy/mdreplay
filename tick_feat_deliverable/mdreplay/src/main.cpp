@@ -111,10 +111,34 @@ void print_usage() {
   return true;
 }
 
+// 解析 + 校验 anchor 覆盖:config 既有值上叠 CLI 覆盖。data_ts 与 system_ts 必须成对(完整映射才能
+// 定一条时间线);成功写回 cfg.anchor(都不给 → 不同步)。任何非法/只给一半 → false(已报错)。
+[[nodiscard]] bool resolve_anchor_override(Config& cfg, const std::optional<std::string>& ov_data,
+                                           const std::optional<std::string>& ov_system) {
+  constexpr auto kBadValue = "需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数";
+  std::optional<std::int64_t> data   = cfg.anchor ? std::optional(cfg.anchor->data_ts_ns) : std::nullopt;
+  std::optional<std::int64_t> system = cfg.anchor ? std::optional(cfg.anchor->system_ts_ns) : std::nullopt;
+  if (ov_data && !(data = mdreplay::parse_anchor_value(*ov_data))) {
+    spdlog::error("--anchor.data_ts 非法({})", kBadValue);
+    return false;
+  }
+  if (ov_system && !(system = mdreplay::parse_anchor_value(*ov_system))) {
+    spdlog::error("--anchor.system_ts 非法({})", kBadValue);
+    return false;
+  }
+  if (data.has_value() != system.has_value()) {
+    spdlog::error("anchor 映射不完整:data_ts 与 system_ts 必须同时给(同步需要完整的 数据时刻↔墙钟 锚点);"
+                  "都不给则不同步(默认各锚首事件)");
+    return false;
+  }
+  cfg.anchor = (data && system) ? std::optional(mdreplay::AnchorCfg{*data, *system}) : std::nullopt;
+  return true;
+}
+
 [[nodiscard]] std::optional<Config> load_with_overrides(int argc, char** argv) {
   std::string                config_path = "config.toml";
   std::optional<std::string> ov_format, ov_dir, ov_kind, ov_start, ov_end, ov_log;
-  std::optional<std::string> ov_anchor_data, ov_anchor_sys;
+  std::optional<std::string> ov_anchor_data, ov_anchor_system;
   std::optional<double>      ov_realtime;
   std::optional<int>         ov_progress;
   std::vector<std::pair<std::string, std::string>> out_ovr;
@@ -137,7 +161,7 @@ void print_usage() {
       if (!(ov_progress = parse_int(next()))) { spdlog::error("--progress-sec 需整数"); return std::nullopt; }
     }
     else if (a == "--anchor.data_ts") ov_anchor_data = next();
-    else if (a == "--anchor.system_ts") ov_anchor_sys = next();
+    else if (a == "--anchor.system_ts") ov_anchor_system = next();
     else if (a.starts_with("--output."))
       out_ovr.emplace_back(a.substr(std::string_view("--output.").size()), next());
     else { spdlog::error("unknown arg: {} (--help 查看用法)", a); return std::nullopt; }
@@ -168,29 +192,7 @@ void print_usage() {
   for (const auto& [key, val] : out_ovr)
     if (!apply_output(*cfg, key, val)) return std::nullopt;
 
-  // anchor:CLI 覆盖/启用。data_ts 与 system_ts 必须成对(完整映射才能定一条线);只给一半 → 报错。
-  {
-    std::optional<std::int64_t> data = cfg->anchor ? std::optional(cfg->anchor->data_ts_ns) : std::nullopt;
-    std::optional<std::int64_t> sys  = cfg->anchor ? std::optional(cfg->anchor->system_ts_ns) : std::nullopt;
-    if (ov_anchor_data) {
-      if (!(data = mdreplay::parse_anchor_value(*ov_anchor_data))) {
-        spdlog::error("--anchor.data_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)");
-        return std::nullopt;
-      }
-    }
-    if (ov_anchor_sys) {
-      if (!(sys = mdreplay::parse_anchor_value(*ov_anchor_sys))) {
-        spdlog::error("--anchor.system_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)");
-        return std::nullopt;
-      }
-    }
-    if (data.has_value() != sys.has_value()) {
-      spdlog::error("anchor 映射不完整:data_ts 与 system_ts 必须同时给(同步需要完整的 数据时刻↔墙钟 锚点);"
-                    "都不给则不同步(默认各锚首事件)");
-      return std::nullopt;
-    }
-    cfg->anchor = (data && sys) ? std::optional(mdreplay::AnchorCfg{*data, *sys}) : std::nullopt;
-  }
+  if (!resolve_anchor_override(*cfg, ov_anchor_data, ov_anchor_system)) return std::nullopt;
 
   // 覆盖后复校验(CLI 可能注入非法值)
   if (cfg->realtime < 0.0 || cfg->realtime > 1.0) {

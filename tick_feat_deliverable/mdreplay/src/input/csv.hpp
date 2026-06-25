@@ -44,6 +44,21 @@ namespace detail {
   return v;
 }
 
+// 读一个引号字段(line[i]=='"'):去引号、`""`→`"`,推进 i 到字段末逗号/行尾,返回去引号内容。
+[[nodiscard]] inline std::string read_quoted_field(std::string_view line, std::size_t& i) {
+  const std::size_t n = line.size();
+  std::string       field;
+  ++i;  // 跳开头引号
+  while (i < n) {
+    if (line[i] == '"') {
+      if (i + 1 < n && line[i + 1] == '"') { field += '"'; i += 2; }  // "" → "
+      else { ++i; break; }                                            // 闭合引号
+    } else field += line[i++];
+  }
+  while (i < n && line[i] != ',') ++i;  // 跳到字段末逗号
+  return field;
+}
+
 // 行 → 字段视图。无引号 → 零拷贝(视图指向 line);含引号 → 去引号到 owned,视图指向 owned。
 // fields/owned 均复用(清空重填),峰值 O(1 行)。视图生命周期 = line(快路)/ owned(慢路)。
 inline void split_csv(std::string_view line, std::vector<std::string_view>& fields,
@@ -63,23 +78,16 @@ inline void split_csv(std::string_view line, std::vector<std::string_view>& fiel
   const std::size_t n = line.size();
   std::size_t       i = 0;
   for (;;) {
-    std::string cur;
-    if (i < n && line[i] == '"') {  // 引号字段
-      ++i;
-      while (i < n) {
-        if (line[i] == '"') {
-          if (i + 1 < n && line[i + 1] == '"') { cur += '"'; i += 2; }  // "" → "
-          else { ++i; break; }                                          // 闭合引号
-        } else cur += line[i++];
-      }
-      while (i < n && line[i] != ',') ++i;  // 跳到字段末逗号
-    } else {                                // 普通字段
+    std::string field;
+    if (i < n && line[i] == '"') {
+      field = read_quoted_field(line, i);
+    } else {  // 普通字段:到下一个逗号/行尾
       const auto comma = line.find(',', i);
       const auto end   = (comma == std::string_view::npos) ? n : comma;
-      cur.assign(line.substr(i, end - i));
+      field.assign(line.substr(i, end - i));
       i = end;
     }
-    owned.push_back(std::move(cur));
+    owned.push_back(std::move(field));
     if (i < n && line[i] == ',') { ++i; continue; }  // 还有下一字段
     break;
   }
