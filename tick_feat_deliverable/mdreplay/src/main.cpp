@@ -215,17 +215,26 @@ struct Output {
   std::unique_ptr<mdreplay::Sink> sink;
 };
 
-// 输出恒为 shm(gconf v1.2.2 生产段):book → BookTickBoard(单档 BBO,输入多档则取 L0);
-// trade → TradeRing(临时旧段,待 gconf 出 market trade 段)。段容量 = N_SYMS(板按 LID 索引)。
-[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind) {
+// 输出恒为 shm:book depth==1 → BookTickBoard(单档 BBO,gconf v1.2.2 生产段,契约不变);
+// book depth>1 → DepthBoard(mdreplay 本地多档段,写全档);trade → TradeRing(临时旧段,待 gconf
+// 出 market trade 段)。段容量 = N_SYMS(板按 LID 索引)。
+[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind, std::size_t depth) {
   const auto& o = cfg.output;
-  if (kind == Kind::Book) {
+  if (kind == Kind::Book && depth == 1) {  // BBO:走生产 BookTickBoard,逐字节不变
     auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::BookTickBoard), v2::SegKind::Board,
                                           sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS,
                                           v2::kBoardSchemaHash, o.create);
     if (!seg) return std::unexpected(seg.error());
     auto* board = reinterpret_cast<v2::BookTickBoard*>(seg->base());
     return Output{std::move(*seg), std::make_unique<mdreplay::BookSink>(board)};
+  }
+  if (kind == Kind::Book) {  // depth>1:走本地多档 DepthBoard,写全 depth 档
+    auto seg = mdreplay::ShmSegment::open(o.path, sizeof(mdreplay::DepthBoard), v2::SegKind::Board,
+                                          sizeof(mdreplay::DepthBoardSlot), gconf::sym::N_SYMS,
+                                          mdreplay::kDepthBoardSchemaHash, o.create);
+    if (!seg) return std::unexpected(seg.error());
+    auto* board = reinterpret_cast<mdreplay::DepthBoard*>(seg->base());
+    return Output{std::move(*seg), std::make_unique<mdreplay::DepthSink>(board)};
   }
   auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::TradeRing), v2::SegKind::BcastRing,
                                         sizeof(v2::TradeEntry), v2::TRADE_RING_CAP,
@@ -352,16 +361,19 @@ int main(int argc, char** argv) {
     spdlog::error("no *.{}.{} under '{}'", cfg->input_kind, cfg->input_format, cfg->dir);
     return 1;
   }
-  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;  // 仅供输入档数提示;输出恒 BBO
+  // book 档数决定输出段:depth==1 → BookTickBoard(BBO);depth>1 → DepthBoard(多档)。trade 恒 1。
+  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;
   spdlog::info("input: {} {} sources, kind={}, depth={}, realtime={}, window=[{}..{}]", sources.size(),
                cfg->input_format, cfg->input_kind, depth, cfg->realtime, cfg->start_ns, cfg->end_ns);
 
-  auto out = open_output(*cfg, kind);
+  auto out = open_output(*cfg, kind, depth);
   if (!out) {
     spdlog::error("open output failed: {}", mdreplay::to_string(out.error()));
     return 1;
   }
-  spdlog::info("output: shm → {} ({})", cfg->output.path, cfg->output.create ? "created" : "attached");
+  const char* seg_type = (kind != Kind::Book) ? "TradeRing" : (depth == 1 ? "BookTickBoard(BBO)" : "DepthBoard(多档)");
+  spdlog::info("output: shm → {} [{}, {} 档] ({})", cfg->output.path, seg_type, depth,
+               cfg->output.create ? "created" : "attached");
 
   if (!replay(*cfg, std::move(sources), *out->sink, skips)) return 1;  // anchor 不合理 → 已报错,拒启动
   out->sink->on_finish();          // 去向相关收尾(trade 环绕圈告警等)

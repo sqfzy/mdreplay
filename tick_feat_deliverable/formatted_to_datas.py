@@ -2,8 +2,14 @@
 """formatted_to_datas.py —— tick_feat 侧一次性导出器(在 mdreplay 之外,保其独立)。
 
 把 formatted_2h 的 64 列私有格式转成 mdreplay 的输入契约,落到 datas/:
-    <venue>_<symbol>.book.csv   表头  ts,symbol,bid_px,bid_qty,ask_px,ask_qty
+    <venue>_<symbol>.book.csv   表头  ts,symbol,update_id,bid_px,bid_qty,ask_px,ask_qty[,..._1..]
     <venue>_<symbol>.trade.csv  表头  ts,symbol,side,px,qty
+
+update_id(mdreplay book 输入必填):formatted 无交易所真值 seqno → 这里**合成 per-symbol 单调计数器**
+    (每文件即每 symbol,按 ts 序 1,2,3... 递增)。严格单调 → mdreplay claim_if_newer 去重恒 0。
+    注:非交易所真值,仅为让 book 回放开箱可跑;要真值须改 format_jsonl.py 从 raw WS 带出(另开任务)。
+
+档数:formatted 源仅 15 档(bp0..bp14)→ --depth ∈ {1,5,10,15};mdreplay 引擎支持到 25,但 20/25 无源数据。
 
 换算口径(已对源数据核实):
     ts    epoch µs → ns(×1000)
@@ -40,17 +46,17 @@ def unscale_1e8(int_str: str) -> str:
 
 
 def book_header(depth: int) -> list[str]:
-    """book 表头:level0 不带后缀(= BBO);k≥1 为 bid_px_k 等。depth ∈ {1,5}。"""
-    cols = ["ts", "symbol"]
+    """book 表头:update_id 紧随 symbol;level0 不带后缀(= BBO),k≥1 为 bid_px_k 等。depth ∈ {1,5,10,15}。"""
+    cols = ["ts", "symbol", "update_id"]
     for k in range(depth):
         s = "" if k == 0 else f"_{k}"
         cols += [f"bid_px{s}", f"bid_qty{s}", f"ask_px{s}", f"ask_qty{s}"]
     return cols
 
 
-def book_row(row: list[str], ts_ns: int, symbol: str, depth: int) -> list:
-    """从 64 列 OB 行取 depth 档(价 ×1e8→十进制,量原值透传)。"""
-    out: list = [ts_ns, symbol]
+def book_row(row: list[str], ts_ns: int, symbol: str, depth: int, update_id: int) -> list:
+    """从 64 列 OB 行取 depth 档(价 ×1e8→十进制,量原值透传);update_id = per-symbol 单调计数器。"""
+    out: list = [ts_ns, symbol, update_id]
     for k in range(depth):
         out += [unscale_1e8(row[BP0 + k]), row[BA0 + k],
                 unscale_1e8(row[AP0 + k]), row[AA0 + k]]
@@ -86,6 +92,7 @@ def convert_file(src: Path, out_dir: Path, dry_run: bool, depth: int = 1,
     trade_path = dest_dir / f"{stem}.trade.csv"
 
     book_rows = trade_rows = bad_rows = 0
+    book_uid = 0  # per-symbol(每文件)单调计数器 → book update_id;严格递增,claim_if_newer 去重恒 0
     book_f = trade_f = None
     book_w = trade_w = None
     try:
@@ -109,8 +116,9 @@ def convert_file(src: Path, out_dir: Path, dry_run: bool, depth: int = 1,
                     price = float(row[PRICE])
                     if price == 0.0:  # OB 行 → book
                         book_rows += 1
+                        book_uid += 1  # 先自增再写 → update_id 从 1 起严格单调
                         if book_w:
-                            book_w.writerow(book_row(row, ts_ns, symbol, depth))
+                            book_w.writerow(book_row(row, ts_ns, symbol, depth, book_uid))
                     else:  # 成交行 → trade
                         trade_rows += 1
                         if trade_w:
@@ -132,8 +140,9 @@ def main() -> int:
     ap.add_argument("--src", default="formatted_2h", help="源目录(默认 formatted_2h)")
     ap.add_argument("--out", default="datas", help="输出目录(默认 datas)")
     ap.add_argument("--dry-run", action="store_true", help="只统计不落盘")
-    ap.add_argument("--depth", type=int, default=1, choices=(1, 5),
-                    help="book 档数:1(BBO,默认)或 5(五档)")
+    ap.add_argument("--depth", type=int, default=1, choices=(1, 5, 10, 15),
+                    help="book 档数:1(BBO,默认)/5/10/15。formatted 源仅 15 档,故封顶 15;"
+                         "mdreplay 引擎支持到 25,但 20/25 无源数据")
     ap.add_argument("--by-venue", action="store_true",
                     help="按 venue 分子目录(out/<venue>/<symbol>.*.csv),供 mdreplay 每 venue 一个段")
     args = ap.parse_args()

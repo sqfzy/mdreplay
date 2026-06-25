@@ -228,8 +228,8 @@ private:
         return false;
       };
       const std::size_t got = highest_book_level([&](std::size_t k) { return idx("bid_px_" + std::to_string(k)); }) + 1;
-      spdlog::error("csv '{}': book 档数 {} 不受支持 → 跳过该文件。mdreplay 只接受 1 档(BBO,列 bid_px/...)"
-                    "或 5 档(列 ..._1.._4),不截断、不补齐。", path, got);
+      spdlog::error("csv '{}': book 档数 {} 不受支持 → 跳过该文件。mdreplay 只接受 {{1,5,10,15,20,25}} 档"
+                    "(1=BBO 列 bid_px/...;d>1 需连续列 ..._1.._{{d-1}}),不截断、不补齐、不跳档。", path, got);
     }
     return std::unexpected(cols.error());
   }

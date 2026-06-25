@@ -26,13 +26,24 @@ namespace mdreplay {
   return e == Error::ScaleOverflow ? SkipReason::ScaleOverflow : SkipReason::BadNumber;
 }
 
-// book 档数判定(唯一真相源,csv 表头与 json 每行键共用):只接受 1 或 5,残缺/>5 → nullopt。
-// marker(k) 报第 k 档是否存在(k∈1..5)。无 _1.. → 1 档;_1.._4 齐且无 _5 → 5 档;其余拒。
+// 受支持档数集合:{1,5,10,15,20,25}(25 == kMaxDepth,DepthBoard 段定长上限)。
+[[nodiscard]] inline constexpr bool is_supported_depth(std::size_t d) noexcept {
+  return d == 1 || d == 5 || d == 10 || d == 15 || d == 20 || d == 25;
+}
+
+// book 档数判定(唯一真相源,csv 表头与 json 每行键共用):只接受 {1,5,10,15,20,25},残缺/跳档/越界 → nullopt。
+// marker(k) 报第 k 档(_k 后缀,k≥1)是否存在;level0 无后缀恒在。
+// 规则:从 _1 起连续存在到 _(depth-1)、且 _depth 起再无任何档 → depth 档(含 level0);否则拒(不截断)。
+//   无任何 _k → 1 档(BBO);_1.._4 齐且无更高 → 5 档;_1.._9 → 10;_1.._14 → 15;_1.._19 → 20;_1.._24 → 25。
 template <class MarkerFn>
 [[nodiscard]] inline std::optional<std::size_t> book_depth_of(MarkerFn marker) {
-  if (!marker(1) && !marker(2) && !marker(3) && !marker(4) && !marker(5)) return std::size_t{1};
-  if (marker(1) && marker(2) && marker(3) && marker(4) && !marker(5)) return std::size_t{5};
-  return std::nullopt;  // 残缺档 或 >5 档
+  constexpr std::size_t kProbeMax = 2 * kMaxDepth + 2;  // 探到足以区分"略超 25"与受支持档
+  std::size_t           k         = 1;
+  while (k <= kProbeMax && marker(k)) ++k;  // markers 1..k-1 连续存在,marker(k) 缺
+  const std::size_t depth = k;              // level0 恒在 → depth 档
+  for (std::size_t j = k + 1; j <= kProbeMax; ++j)
+    if (marker(j)) return std::nullopt;     // k 之后又冒出档 = 跳档/中缺 → 拒
+  return is_supported_depth(depth) ? std::optional<std::size_t>{depth} : std::nullopt;
 }
 
 // 诊断用(仅在 book_depth_of 拒绝后,为自描述报错数出实际档数):返回呈现的最高档号

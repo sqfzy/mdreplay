@@ -24,6 +24,7 @@
 
 #include "core/error.hpp"
 #include "core/record.hpp"
+#include "output/depth_board.h"  // mdreplay 本地多档段(depth>1 走它)
 #include "output/sink.hpp"
 
 namespace mdreplay {
@@ -127,6 +128,35 @@ public:
 private:
   gconf::shm::v2::BookTickBoard* board_;
   std::uint64_t                 deduped_{0};
+};
+
+// 多档 Record → DepthBoard.slot[lid] 写全档(depth>1 时用;depth==1 仍走 BookSink/BookTickBoard)。
+// 与 BookSink 同套 claim_if_newer(update_id) 去重语义,只是写全 depth 档而非截断 L0。
+class DepthSink : public Sink {
+public:
+  explicit DepthSink(DepthBoard* board) : board_(board) {}
+  Result<void> write(const Record& r) override {
+    std::uint64_t replaced_old = 0;  // claim_if_newer 出参:单写者回放用不到
+    if (board_->claim_if_newer(r.gid, r.update_id, replaced_old))  // r.gid 即 LID
+      board_->slot[r.gid].write(r.ts_ns, r.update_id, r.gid, r.price_scale, r.qty_scale, r.depth,
+                                r.bid_px.data(), r.bid_qty.data(), r.ask_px.data(), r.ask_qty.data());
+    else
+      ++deduped_;  // update_id 非递增 → 未写段(同 BookSink 语义)
+    return {};
+  }
+
+  // 同 BookSink:去重数 >0 即告警(clean 回放恒 0,>0 = 输入 update_id 有重复/倒退)。
+  void on_finish() override {
+    if (deduped_ > 0)
+      spdlog::warn("depth: {} 条 update_id 非递增(≤已记录)被 claim_if_newer 去重、**未写入段**;"
+                   "回放 update_id 本应每 symbol 单调,请检查输入是否有重复/倒退序号", deduped_);
+  }
+
+  [[nodiscard]] std::uint64_t deduped() const noexcept { return deduped_; }
+
+private:
+  DepthBoard*   board_;
+  std::uint64_t deduped_{0};
 };
 
 class TradeSink : public Sink {

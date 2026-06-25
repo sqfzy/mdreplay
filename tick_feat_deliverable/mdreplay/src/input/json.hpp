@@ -62,8 +62,8 @@ private:
         if (!d) {  // 残缺/>5 档:自描述告知一次(json 逐行,避免每行刷屏),仍按 BadField 跳该行
           if (!depth_warned_) {
             const std::size_t got = highest_book_level(present) + 1;
-            spdlog::warn("json '{}': book 档数 {} 不受支持(只支持 1 档 BBO 或 5 档,不截断);该类行将按坏行跳过",
-                         path_, got);
+            spdlog::warn("json '{}': book 档数 {} 不受支持(只支持 {{1,5,10,15,20,25}} 档,不截断、不跳档);"
+                         "该类行将按坏行跳过", path_, got);
             depth_warned_ = true;
           }
           skips_->add(SkipReason::BadField);
