@@ -3,11 +3,12 @@
 通用**单入单出**记录回放:读录制的逐笔行情文件,按时序重放到一个去向(gconf v2 **shm 段** /
 **csv** / **json** 文件)。主用途是给下游(特征引擎等)当实盘 WS feed 的替身;也可做格式转换/落盘/调试。
 
-**独立、普适**:只依赖 gconf v2 段契约 + csv-parser(均已 vendored:`gconf/`、`third_party/csvparser/`)
-+ `toml++` / `spdlog` / `nlohmann_json`。不绑任何上游/下游项目的私有格式或口径——只认「带时间戳的记录流」。
+**独立、普适**:只依赖 gconf v2 段契约(vendored 进 `gconf/`)+ `toml++` / `spdlog` / `nlohmann_json`。
+不绑任何上游/下游项目的私有格式或口径——只认「带时间戳的记录流」。**全 header-only,零第三方解析库**。
 
-> CSV 解析走 vendored 的 csv-parser 5.3.0(RFC4180:引号/转义/CRLF)。注意它**不是 header-only**(xmake-repo
-> 的 `csvparser` 包误标 headeronly,实为多文件需编译),故 vendor 源码 + `xmake.lua` 里编成静态库 target。
+> CSV 解析走手写逐行读(`input/csv.hpp`:`getline` + 引号感知切分,RFC4180-lite — 支持 `"..."`/`""`
+> 转义/CRLF,不支持字段内换行)。**为何不用 csv-parser**:它的 reader 每实例占 ~5MB 已提交堆,N 路归并
+> 同开 N 个 → 内存随**文件数**涨;手写 `ifstream` 逐行读峰值 O(1 行)。数值走 `fixed.hpp` 定点,不碰 double。
 
 ## 设计:三段式 + 双格式轴
 
@@ -101,6 +102,9 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
 
 - **可复现**:`realtime=0` 下,产出(shm 段 / 文件)逐字节确定——归并序固定、`exch_ns` 取数据、
   段头 `created_ns=0`。同一输入跑两遍逐字节一致。csv↔json↔shm 经定点往返**数值无损**(尾随零归一,如 68.80→68.8)。
+- **内存:流式逐行读,峰值与文件大小/总行数无关(实测 266MB 输入仅 ~0MB 已提交堆)**。每源持一个常开文件
+  句柄、只缓冲 1 条记录 → 多天数据全放一个目录**单次连续回放不 OOM**(一个连续时钟,跨天节奏无缝)。
+  唯一随**文件数**线性涨的是文件句柄(受 `ulimit -n`,默认 1024);单次跑 >1000 个文件时 `ulimit -n 4096`。
 - **广播环不背压**:`shm` 的 trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量
   会绕圈覆盖(消费者只能拿到最近一圈)。要让消费者无损跟上,用 `realtime=1.0` 真盘节奏。
 - 段头自校验:attach 既有段时比对 magic/version/entry_size/capacity/schema_hash,不符拒启动。
