@@ -23,6 +23,7 @@
 #include "core/merge.hpp"
 #include "core/record.hpp"
 #include "core/report.hpp"
+#include "core/signal.hpp"
 #include "core/skip.hpp"
 #include "input/csv.hpp"
 #include "input/discover.hpp"
@@ -263,8 +264,11 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
   mdreplay::Merger   merger(std::move(sources), cfg.start_ns, cfg.end_ns);
   mdreplay::Clock    clock(cfg.realtime);
   mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
-  while (const auto rec = merger.next()) {
-    clock.pace_to(rec->ts_ns);
+  while (!mdreplay::stop_requested()) {
+    const auto rec = merger.next();
+    if (!rec) break;
+    clock.pace_to(rec->ts_ns, mdreplay::g_stop_requested);
+    if (mdreplay::stop_requested()) break;  // pacing 被信号打断 → 不发这条半路事件,停在干净边界
     (void)sink.write(*rec);
     reporter.on_event(*rec);
   }
@@ -276,6 +280,8 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
 int main(int argc, char** argv) {
   auto cfg = load_with_overrides(argc, argv);
   if (!cfg) return 1;
+
+  mdreplay::install_signal_handlers();  // SIGINT/SIGTERM → 优雅停止(收尾后退出),不被硬杀
 
   const auto lvl = parse_log_level(cfg->log_level);
   if (!lvl) {
@@ -316,6 +322,8 @@ int main(int argc, char** argv) {
     spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
 
   replay(*cfg, std::move(sources), *out->sink, skips);
+  if (mdreplay::stop_requested())  // 收到信号:在干净边界停了,产出截至中断点有效
+    spdlog::warn("收到中断信号,已优雅停止(产出截至中断点有效,下方为截至此刻的汇总)");
   // 流式:skip 在回放消费期才累加;回放后一次性交代分原因明细 + 未知符号 WARN。
   skips.log_summary();
   return 0;
