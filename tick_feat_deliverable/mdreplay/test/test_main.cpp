@@ -480,6 +480,19 @@ static void test_anchor() {
   Clock h(0.5, Clock::Anchor{1000, 5000});
   CHECK(h.target_system_ns(3000) == 5000 + static_cast<std::int64_t>((3000 - 1000) * 0.5));
 
+  // would_burst:首事件 target 落在过去 → true(拒启动判据)
+  const std::int64_t now = 1'000'000;
+  Clock              ok(1.0, Clock::Anchor{0, now});      // data_ts=0,system_ts=now
+  CHECK(!ok.would_burst(0, now));                          // target=now,不算 burst(>=)
+  CHECK(!ok.would_burst(50, now));                         // target=now+50 > now
+  Clock mid(1.0, Clock::Anchor{100, now});                // data_ts=100 落在数据中间
+  CHECK(mid.would_burst(50, now));                         // ts=50<100 → target=now-50 < now → burst
+  CHECK(!mid.would_burst(100, now));                       // ts=100=data_ts → target=now
+  Clock no_anchor(1.0);
+  CHECK(!no_anchor.would_burst(0, now));                   // 无 anchor → 无 burst 概念
+  Clock asap(0.0, Clock::Anchor{100, now});
+  CHECK(!asap.would_burst(50, now));                       // realtime=0 → 不限速,无 burst 概念
+
   // config:两端齐 → 启用(ns 写法)
   {
     const auto t = toml::parse(
