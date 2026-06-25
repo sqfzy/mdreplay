@@ -42,6 +42,12 @@ public:
            static_cast<std::int64_t>(static_cast<double>(ts_ns - anchor_->data_ts_ns) * realtime_);
   }
 
+  // 该事件在当前墙钟 now_ns 下是否会 burst(其播出墙钟已过去)。无 anchor / realtime<=0 → 无 burst 概念。
+  // 用最早事件查它即"会不会有数据被 burst" —— target 随 ts 单调增,首事件是最坏情况。
+  [[nodiscard]] bool would_burst(std::int64_t ts_ns, std::int64_t now_ns) const noexcept {
+    return anchor_.has_value() && realtime_ > 0.0 && target_system_ns(ts_ns) < now_ns;
+  }
+
   // 阻塞到该事件应发的墙钟时刻。realtime<=0 即不限速直接返回。分块睡 + 查 stop:绝对 target 不变
   // (自校正照旧),但收到停止信号能在 ≤kTick 内打断长 pacing 间隔。
   void pace_to(std::int64_t ts_ns, const std::atomic<bool>& stop) noexcept {

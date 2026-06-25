@@ -290,22 +290,38 @@ load_sources(const Config& cfg, Kind kind, mdreplay::SkipStats& skips) {
   return sources;
 }
 
-void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> sources,
-            mdreplay::Sink& sink, const mdreplay::SkipStats& skips) {
+// 返回 false = anchor 设置不合理(首事件会 burst),已报错、未发任何事件 → main 转非零退出。
+[[nodiscard]] bool replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> sources,
+                          mdreplay::Sink& sink, const mdreplay::SkipStats& skips) {
   std::optional<mdreplay::Clock::Anchor> anchor;
   if (cfg.anchor) anchor = mdreplay::Clock::Anchor{cfg.anchor->data_ts_ns, cfg.anchor->system_ts_ns};
   mdreplay::Merger   merger(std::move(sources), cfg.start_ns, cfg.end_ns);
   mdreplay::Clock    clock(cfg.realtime, anchor);
   mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
+  bool first = true;
   while (!mdreplay::stop_requested()) {
     const auto rec = merger.next();
     if (!rec) break;
+    if (first) {  // 强制:最早被回放的事件(最坏情况)不得 burst,否则 anchor 设置不合理 → 拒
+      first = false;
+      const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+      if (clock.would_burst(rec->ts_ns, now_ns)) {
+        spdlog::error("anchor 设置会让首事件 burst:首条事件 ts={}ns,其播出墙钟 {}ns 已早于现在 {}ns。"
+                      "病因 = data_ts 落在数据中间(应 ≤ 首条 ts)或 system_ts 不够未来。"
+                      "请把 data_ts 设到 ≤ {} 并把 system_ts 取足够未来(如 now+几秒);拒绝启动。",
+                      rec->ts_ns, clock.target_system_ns(rec->ts_ns), now_ns, rec->ts_ns);
+        return false;
+      }
+    }
     clock.pace_to(rec->ts_ns, mdreplay::g_stop_requested);
     if (mdreplay::stop_requested()) break;  // pacing 被信号打断 → 不发这条半路事件,停在干净边界
     (void)sink.write(*rec);
     reporter.on_event(*rec);
   }
   reporter.finish();
+  return true;
 }
 
 }  // namespace
@@ -348,10 +364,15 @@ int main(int argc, char** argv) {
       const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::system_clock::now().time_since_epoch())
                               .count();
+      // 强制:system_ts 必须在未来(否则数据从过去起播 → burst,灌爆 trade 段)。早失败,免载入白跑。
+      if (cfg->anchor->system_ts_ns < now_ns) {
+        spdlog::error("anchor.system_ts 必须在未来(现在={}ns,得到={}ns)。同步回放需把发令墙钟设到 now 之后"
+                      "(如 now+几秒);取过去会让数据从过去起播、burst 灌爆 trade 段 → 拒绝启动。",
+                      now_ns, cfg->anchor->system_ts_ns);
+        return 1;
+      }
       spdlog::info("anchor 启用:data_ts={}ns ↔ system_ts={}ns(多进程填同值 + 同 realtime 即同钟)",
                    cfg->anchor->data_ts_ns, cfg->anchor->system_ts_ns);
-      if (cfg->anchor->system_ts_ns < now_ns)
-        spdlog::warn("anchor.system_ts 在过去 → 早于当下的事件将快进(burst);喂 trade 广播环时建议设未来时刻");
     }
   }
 
@@ -377,7 +398,7 @@ int main(int argc, char** argv) {
   else
     spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
 
-  replay(*cfg, std::move(sources), *out->sink, skips);
+  if (!replay(*cfg, std::move(sources), *out->sink, skips)) return 1;  // anchor 不合理 → 已报错,拒启动
   if (mdreplay::stop_requested())  // 收到信号:在干净边界停了,产出截至中断点有效
     spdlog::warn("收到中断信号,已优雅停止(产出截至中断点有效,下方为截至此刻的汇总)");
   // 流式:skip 在回放消费期才累加;回放后一次性交代分原因明细 + 未知符号 WARN。

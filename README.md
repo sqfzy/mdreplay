@@ -111,7 +111,9 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
 - **跨进程同钟(时序锚)**:单入单出意味着 book 与 trade 分两进程跑,各自锚首事件会**墙钟错位**。配
   `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`play_wall(ts)=system_ts+(ts−data_ts)×realtime`)
   后,多进程填**同一 anchor + 同 realtime** → 对同一 ts 算出同一墙钟 → 严格同钟(跨 venue、跨机靠 NTP 亦可)。
-  不写则默认各锚首事件(单进程零负担)。`system_ts` 用 `system_clock`(UTC),建议取未来几秒免初始 burst。
+  不写则默认各锚首事件(单进程零负担)。`system_ts` 用 `system_clock`(UTC)。**代码强制不许 burst**:
+  若 `system_ts` 在过去、或 `data_ts` 落在数据中间致**最早被回放的事件**播出墙钟已过去 → **拒启动**(报错指出
+  首条 ts、要把 data_ts 设 ≤ 它、system_ts 取足够未来)。`data_ts` 居中但 `system_ts` 够远(首事件仍不 burst)则放行。
   **省心法:`replay_sync.sh`** —— 给**任意 N 个**单入单出单元自动盖同一个 anchor(book/trade 只是 N=2),
   自动算共享 `system_ts`(now+delay)与 `data_ts`(扫全局最早 ts,零 burst),Ctrl-C 一次干净停全部:
   ```bash

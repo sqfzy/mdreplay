@@ -165,6 +165,8 @@ main() {
   [ -x "$BIN" ] || die "找不到可执行 $BIN —— 先 (cd mdreplay && xmake build mdreplay)"
   [ "${#SPECS[@]}" -ge 1 ] || die "至少要一个 --run \"<单元参数>\"(--help 查看用法)"
   [[ "$DELAY" =~ ^[0-9]+$ ]] || die "--delay 需非负整数秒(得到 '$DELAY')"
+  # system_ts 必须在未来(mdreplay 强制),故自动算时 delay 至少 1s(显式 --system-ts 时不受限)。
+  [ -n "$SYSTEM_TS_ARG" ] || [ "$DELAY" -ge 1 ] || die "--delay 需 ≥1(system_ts 必须在未来,否则 mdreplay 拒启动)"
 
   DATA_TS=$(resolve_data_ts)
   [ -n "$DATA_TS" ] || die "无法自动确定 data_ts(没扫到文件首行 ts);请给 --start 或 --data-ts"
