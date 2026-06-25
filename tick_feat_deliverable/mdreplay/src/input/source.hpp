@@ -1,13 +1,11 @@
 #pragma once
-// source.hpp — 单个输入源的有序游标接口 + 内存载入实现。merge 通过 peek/advance 做 N 路归并。
+// source.hpp — 单个输入源的有序游标接口。merge 通过 peek/advance 做 N 路归并,与格式无关。
 //
 // 契约:同一 Source 产出的 Record 必须按 ts_ns 非降序(单文件天然有序);peek() 返回当前头,
-// nullptr = 耗尽。各格式解析器(csv/json)都把记录载入 LoadedSource —— 核心只认本接口,与格式无关。
+// nullptr = 耗尽。各格式的**流式**实现(csv.hpp::StreamingCsvSource / json.hpp::StreamingJsonSource)
+// 在 advance() 时才惰性解析下一行——核心只认本接口,只缓冲 1 条,峰值内存 O(文件数)。
 
-#include <cstddef>
 #include <string>
-#include <utility>
-#include <vector>
 
 #include "core/record.hpp"
 
@@ -22,18 +20,6 @@ struct Source {
   virtual ~Source() = default;
   [[nodiscard]] virtual const Record* peek() = 0;  // 当前头;nullptr = 耗尽
   virtual void advance() = 0;                       // 推进到下一条
-};
-
-// 已载入内存的有序 Record 源(csv/json 解析器的共同产物)。
-class LoadedSource : public Source {
-public:
-  explicit LoadedSource(std::vector<Record> rows) : rows_(std::move(rows)) {}
-  [[nodiscard]] const Record* peek() override { return i_ < rows_.size() ? &rows_[i_] : nullptr; }
-  void                        advance() override { ++i_; }
-
-private:
-  std::vector<Record> rows_;
-  std::size_t         i_ = 0;
 };
 
 }  // namespace mdreplay

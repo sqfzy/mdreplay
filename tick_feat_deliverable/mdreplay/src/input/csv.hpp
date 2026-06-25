@@ -16,7 +16,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <csv.hpp>
 #include <spdlog/spdlog.h>
@@ -48,6 +47,9 @@ struct BookColumns {
 
 // 开 CSV reader:显式格式(不让 guess_csv 猜分隔符)——逗号、首行表头、保留列数不符的行
 // (KEEP 把 ragged 行交回调用方按 row.size() 计数跳过,而非让库静默吞掉,保 skipped 可观测)。
+// 走 filename(mmap)构造:mmap 的页是**文件缓存、可回收**(内存紧张时内核驱逐,不引发 OOM);
+// 而 stream 构造会把读缓冲/arena 放进**已提交堆**(不可回收,反而更易 OOM)。OOM 看的是匿名(已提交)
+// 内存,流式已让它降到 O(源数)——见 NOTES/README 的内存说明。
 [[nodiscard]] inline Result<std::unique_ptr<csv::CSVReader>> open_csv_reader(const std::string& path) {
   csv::CSVFormat fmt;
   fmt.delimiter(',');
