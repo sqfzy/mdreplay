@@ -65,11 +65,25 @@ def parse_venue_symbol(stem: str) -> tuple[str, str]:
     return parts[0], parts[2]
 
 
-def convert_file(src: Path, out_dir: Path, dry_run: bool, depth: int = 1) -> tuple[int, int, int]:
-    """转一个源文件 → 一对 book/trade 文件。返回 (book_rows, trade_rows, bad_rows)。"""
+def convert_file(src: Path, out_dir: Path, dry_run: bool, depth: int = 1,
+                 by_venue: bool = False) -> tuple[int, int, int]:
+    """转一个源文件 → 一对 book/trade 文件。返回 (book_rows, trade_rows, bad_rows)。
+
+    by_venue=False:  out_dir/<venue>_<symbol>.{book,trade}.csv          (扁平,默认)
+    by_venue=True:   out_dir/<venue>/<symbol>.{book,trade}.csv          (分 venue 子目录)
+        —— 供 mdreplay 按 venue 分段回放(每 venue 一个 shm DepthBoard,避免同 symbol 跨所覆盖)。
+    """
     venue, symbol = parse_venue_symbol(src.stem)
-    book_path = out_dir / f"{venue}_{symbol}.book.csv"
-    trade_path = out_dir / f"{venue}_{symbol}.trade.csv"
+    if by_venue:
+        dest_dir = out_dir / venue
+        stem = symbol
+    else:
+        dest_dir = out_dir
+        stem = f"{venue}_{symbol}"
+    if not dry_run:
+        dest_dir.mkdir(parents=True, exist_ok=True)  # 幂等:已存在不报错
+    book_path = dest_dir / f"{stem}.book.csv"
+    trade_path = dest_dir / f"{stem}.trade.csv"
 
     book_rows = trade_rows = bad_rows = 0
     book_f = trade_f = None
@@ -120,6 +134,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只统计不落盘")
     ap.add_argument("--depth", type=int, default=1, choices=(1, 5),
                     help="book 档数:1(BBO,默认)或 5(五档)")
+    ap.add_argument("--by-venue", action="store_true",
+                    help="按 venue 分子目录(out/<venue>/<symbol>.*.csv),供 mdreplay 每 venue 一个段")
     args = ap.parse_args()
 
     src_dir = Path(args.src)
@@ -142,7 +158,7 @@ def main() -> int:
     tot_book = tot_trade = tot_bad = 0
     for i, src in enumerate(sources, 1):
         try:
-            b, t, bad = convert_file(src, out_dir, args.dry_run, args.depth)
+            b, t, bad = convert_file(src, out_dir, args.dry_run, args.depth, args.by_venue)
         except ValueError as e:
             print(f"  [skip] {src.name}: {e}", file=sys.stderr)
             continue
@@ -152,7 +168,7 @@ def main() -> int:
         print(f"  [{i:>2}/{len(sources)}] {src.name}: book={b} trade={t}"
               + (f" bad={bad}" if bad else ""))
 
-    out_files = 0 if args.dry_run else len(list(out_dir.glob("*.csv")))
+    out_files = 0 if args.dry_run else len(list(out_dir.rglob("*.csv")))  # rglob:含 by-venue 子目录
     print(f"[convert] done: {len(sources)} 源 → {out_files} 文件, "
           f"book={tot_book} trade={tot_trade} bad={tot_bad}")
     return 0
