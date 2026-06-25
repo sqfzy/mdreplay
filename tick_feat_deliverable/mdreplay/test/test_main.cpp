@@ -54,6 +54,9 @@ std::unique_ptr<mdreplay::Source> make_src(std::vector<std::int64_t> ts, std::ui
   }
   return s;
 }
+
+// 流式源:skip 在消费(advance)期才归账,断言总数前先消费到耗尽。
+void drain(mdreplay::Source& s) { while (s.peek()) s.advance(); }
 }  // namespace
 
 static void test_fixed() {
@@ -249,10 +252,11 @@ static void test_e2e() {
     SkipStats   skips;
     const auto  src = load_csv_source(dir + "/x_SOLUSDT.book.csv", Kind::Book, skips);
     CHECK(src.has_value());
-    CHECK(skips.total() == 1 && skips.count(SkipReason::UnknownSymbol) == 1);  // BADSYM 分类正确
     const Record* r = (*src)->peek();
     CHECK(r && r->ts_ns == 1000 && r->gid == 21 && r->price_scale == 2 && r->depth == 1);
     CHECK(r->bid_px[0] == 6884 && r->ask_px[0] == 6885 && r->bid_qty[0] == 190667 && r->ask_qty[0] == 126072);
+    if (src.has_value()) drain(**src);  // 消费余下 → BADSYM 计入 skip
+    CHECK(skips.total() == 1 && skips.count(SkipReason::UnknownSymbol) == 1);  // BADSYM 分类正确
     fs::remove_all(dir);
   }
 }
@@ -325,7 +329,6 @@ static void test_csv_quoting() {
   SkipStats   sk;
   const auto  src = load_csv_source(p, Kind::Trade, sk);
   CHECK(src.has_value());
-  CHECK(sk.total() == 1 && sk.count(SkipReason::Malformed) == 1);  // 仅第 3 行(列数不符)被跳
   if (src.has_value()) {
     const Record* r0 = (*src)->peek();
     CHECK(r0 && r0->ts_ns == 100 && r0->gid == 21 && r0->side == 0);
@@ -336,6 +339,7 @@ static void test_csv_quoting() {
     (*src)->advance();
     CHECK((*src)->peek() == nullptr);  // 第 3 行跳过后耗尽
   }
+  CHECK(sk.total() == 1 && sk.count(SkipReason::Malformed) == 1);  // 消费完:仅第 3 行(列数不符)被跳
   fs::remove_all(dir);
 }
 
@@ -358,12 +362,13 @@ static void test_skip_reasons() {
   SkipStats   sk;
   const auto  src = load_csv_source(p, Kind::Trade, sk);
   CHECK(src.has_value());
+  const Record* r = src.has_value() ? (*src)->peek() : nullptr;
+  CHECK(r && r->ts_ns == 100);  // 唯一好行留下(首条)
+  if (src.has_value()) drain(**src);  // 消费余下 3 坏行 → 计入 skip
   CHECK(sk.total() == 3);
   CHECK(sk.count(SkipReason::BadTimestamp) == 1);
   CHECK(sk.count(SkipReason::BadField) == 1);
   CHECK(sk.count(SkipReason::BadNumber) == 1);
-  const Record* r = src.has_value() ? (*src)->peek() : nullptr;
-  CHECK(r && r->ts_ns == 100);  // 唯一好行留下
   fs::remove_all(dir);
 }
 

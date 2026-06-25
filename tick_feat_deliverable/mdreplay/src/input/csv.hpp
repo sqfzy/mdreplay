@@ -80,14 +80,74 @@ template <class HasFn>
   return cols;
 }
 
-// 表头驱动加载一个 CSV 文件 → Source。book 档数自动识别(1 或 5,残缺/>5 拒整文件,绝不截断);
-// skips 按原因累加坏/未知行。文件/表头错误 → 上抛。
+// 流式 CSV 源:持 reader + 迭代器,advance() 时才解析下一行(只缓冲 1 条 head_)。
+// 峰值内存 O(1 条 + reader 分块),与文件大小无关。坏行/未知符号在 advance() 期归账到 skips。
+// string_view 生命周期:get_sv 视图指向当前 row 缓冲,在 ++it_ 前已编码进 Record,无悬垂。
+class StreamingCsvSource : public Source {
+public:
+  StreamingCsvSource(std::unique_ptr<csv::CSVReader> reader, Kind kind, BookColumns cols,
+                     std::size_t n_cols, SkipStats& skips, std::string path)
+      : reader_(std::move(reader)), kind_(kind), cols_(std::move(cols)), n_cols_(n_cols),
+        skips_(&skips), path_(std::move(path)), it_(reader_->begin()), end_(reader_->end()) {
+    advance();  // 预读首条进 head_,满足 peek 契约
+  }
+
+  [[nodiscard]] const Record* peek() override { return head_ ? &*head_ : nullptr; }
+
+  void advance() override {
+    head_.reset();
+    try {
+      for (; it_ != end_; ++it_) {
+        if (auto rec = build_from_row(*it_)) { head_ = std::move(*rec); ++it_; return; }
+      }
+    } catch (const std::exception&) {  // 迭代中途解析异常(罕见):保留前序、提前结束
+      spdlog::warn("csv '{}': 迭代中途解析异常,提前结束(已保留前序有效行)", path_);
+      head_.reset();
+    }
+  }
+
+private:
+  // 一行 → Record;跳过(已按原因归账到 skips)返回 nullopt。视图在本函数内编码完,调用方随后才 ++it_。
+  [[nodiscard]] std::optional<Record> build_from_row(csv::CSVRow& row) {
+    if (row.size() != n_cols_) { skips_->add(SkipReason::Malformed); return std::nullopt; }
+    const auto ts = detail::to_i64(row["ts"].get_sv());
+    if (!ts) { skips_->add(SkipReason::BadTimestamp); return std::nullopt; }
+    const auto sym = row["symbol"].get_sv();
+    std::expected<Record, SkipReason> rec = std::unexpected(SkipReason::BadField);  // 默认:side 坏
+    if (kind_ == Kind::Book) {
+      for (std::size_t k = 0; k < cols_.depth; ++k) {
+        bpx_[k] = row[cols_.bid_px[k]].get_sv();  bqty_[k] = row[cols_.bid_qty[k]].get_sv();
+        apx_[k] = row[cols_.ask_px[k]].get_sv();  aqty_[k] = row[cols_.ask_qty[k]].get_sv();
+      }
+      rec = make_book_record(*ts, sym, std::span(bpx_).first(cols_.depth),
+                             std::span(bqty_).first(cols_.depth), std::span(apx_).first(cols_.depth),
+                             std::span(aqty_).first(cols_.depth));
+    } else if (const auto side = detail::to_i64(row["side"].get_sv())) {
+      rec = make_trade_record(*ts, sym, *side, row["px"].get_sv(), row["qty"].get_sv());
+    }
+    if (!rec) { account_build_failure(*skips_, rec.error(), sym); return std::nullopt; }
+    return *rec;
+  }
+
+  std::unique_ptr<csv::CSVReader> reader_;  // 先于 it_ 声明:it_ 由 reader_->begin() 初始化
+  Kind                            kind_;
+  BookColumns                     cols_;
+  std::size_t                     n_cols_;
+  SkipStats*                      skips_;
+  std::string                     path_;
+  csv::CSVReader::iterator        it_, end_;
+  std::optional<Record>           head_;
+  std::array<std::string_view, kMaxDepth> bpx_, bqty_, apx_, aqty_;  // 逐行复用
+};
+
+// 表头驱动开一个 CSV 文件 → 流式 Source。book 档数自动识别(1 或 5,残缺/>5 拒整文件,绝不截断);
+// 文件/表头错误 → 上抛(eager 快速失败);坏/未知行在消费(advance)时归账到 skips。
 [[nodiscard]] inline Result<std::unique_ptr<Source>> load_csv_source(const std::string& path,
                                                                      Kind kind, SkipStats& skips) {
   auto reader = open_csv_reader(path);
   if (!reader) return std::unexpected(reader.error());
 
-  // 列校验(一次性,在迭代前):缺表头 / 缺必需列 → CsvSchema 上抛。
+  // 列校验(一次性,构造前):缺表头 / 缺必需列 → CsvSchema 上抛。
   if ((*reader)->get_col_names().empty()) return std::unexpected(Error::CsvSchema);
   const auto has = [&](csv::string_view c) { return (*reader)->index_of(c) >= 0; };
   if (!has("ts") || !has("symbol")) return std::unexpected(Error::CsvSchema);
@@ -102,37 +162,9 @@ template <class HasFn>
   }
   const std::size_t n_cols = (*reader)->get_col_names().size();
 
-  std::vector<Record> rows;
-  try {
-    std::array<std::string_view, kMaxDepth> bpx, bqty, apx, aqty;  // 逐行复用的档位缓冲
-    for (csv::CSVRow& row : **reader) {
-      if (row.size() != n_cols) { skips.add(SkipReason::Malformed); continue; }  // 列数不符(先护栏)
-
-      const auto ts = detail::to_i64(row["ts"].get_sv());
-      if (!ts) { skips.add(SkipReason::BadTimestamp); continue; }
-
-      const auto sym = row["symbol"].get_sv();
-      std::expected<Record, SkipReason> rec = std::unexpected(SkipReason::BadField);  // 默认:side 坏
-      if (kind == Kind::Book) {
-        for (std::size_t k = 0; k < cols.depth; ++k) {
-          bpx[k]  = row[cols.bid_px[k]].get_sv();  bqty[k] = row[cols.bid_qty[k]].get_sv();
-          apx[k]  = row[cols.ask_px[k]].get_sv();  aqty[k] = row[cols.ask_qty[k]].get_sv();
-        }
-        rec = make_book_record(*ts, sym, std::span(bpx).first(cols.depth),
-                               std::span(bqty).first(cols.depth), std::span(apx).first(cols.depth),
-                               std::span(aqty).first(cols.depth));
-      } else if (const auto side = detail::to_i64(row["side"].get_sv())) {
-        rec = make_trade_record(*ts, sym, *side, row["px"].get_sv(), row["qty"].get_sv());
-      }
-      if (!rec) { account_build_failure(skips, rec.error(), sym); continue; }
-      rows.push_back(*rec);
-    }
-  } catch (const std::exception&) {
-    return std::unexpected(Error::CsvParse);  // 迭代期不可恢复解析错误(罕见)
-  }
-
-  spdlog::debug("csv '{}': {} 档, {} 行", path, cols.depth, rows.size());
-  return std::unique_ptr<Source>{std::make_unique<LoadedSource>(std::move(rows))};
+  spdlog::debug("csv '{}': 流式载入, {} 档", path, cols.depth);
+  return std::unique_ptr<Source>{std::make_unique<StreamingCsvSource>(
+      std::move(*reader), kind, std::move(cols), n_cols, skips, path)};
 }
 
 }  // namespace mdreplay
