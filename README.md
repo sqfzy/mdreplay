@@ -68,14 +68,15 @@ path   = "/shm_bybit_lin_book_tick" # 输出 shm 段名(/开头);输出恒为 gc
 create = true                       # 建段(O_TRUNC 幂等)/ false=attach
 ```
 
-> `[output]` 的 `path` 是统一的「去向定位」:`format=shm` 时是段名,`format=csv|json` 时是文件路径。
-> book 档数不在配置里(由输入自动识别 1/5)。
+> `[output].path` 是 shm 段名(/开头);输出恒为 gconf v1.2.2 段(book→BookTickBoard、trade→TradeRing)。
+> book 输入需带 `update_id` 列(写进段 + claim_if_newer 去重);多档输入只取 L0 BBO。
 
 | 配置项 | CLI |
 |---|---|
 | `input.format` / `dir` / `kind` | `--format` / `--dir` / `--kind` |
 | `replay.realtime` / `start` / `end` | `--realtime` / `--start` / `--end` |
-| `output.format` / `path` / `create` | `--output.format` / `--output.path` / `--output.create` |
+| `output.path` / `create` | `--output.path` / `--output.create` |
+| `replay.anchor` | `--anchor.data_ts` / `--anchor.system_ts`(跨进程同钟) |
 | `log.level` / `progress_sec` | `--log-level` / `--progress-sec` |
 | — | `--config <path>`、`--help` |
 
@@ -90,21 +91,15 @@ xmake build test && xmake run test          # 单元 + e2e 测试
 python3 ../formatted_to_datas.py --out datas            # 1 档(BBO,默认)
 python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
 
-# 回放 book → shm(尽快、可复现);trade 同理另跑一遍。档数(1/5)由输入自动识别
-./build/linux/x86_64/release/mdreplay --kind book  --output.format shm --output.path /shm_bybit_lin_book_v2  --realtime 0
-./build/linux/x86_64/release/mdreplay --kind trade --output.format shm --output.path /shm_bybit_lin_trade_v2 --realtime 0
-
-# 5 档:同命令喂 5 档输入,自动识别 depth=5 → shm DepthBoard 段
-./build/linux/x86_64/release/mdreplay --kind book --dir datas5 --output.format shm --output.path /shm_book5 --realtime 0
-
-# 格式转换:book csv → json 文件
-./build/linux/x86_64/release/mdreplay --kind book --output.format json --output.path out.book.json --realtime 0
+# 回放 book → BookTickBoard 段(尽快、可复现);trade 同理另跑一遍。book 输入需带 update_id 列;多档输入取 L0 BBO
+./build/linux/x86_64/release/mdreplay --kind book  --output.path /shm_bybit_lin_book_tick --output.create true --realtime 0
+./build/linux/x86_64/release/mdreplay --kind trade --output.path /shm_bybit_lin_trade    --output.create true --realtime 0
 ```
 
 ## 注意
 
-- **可复现**:`realtime=0` 下,产出(shm 段 / 文件)逐字节确定——归并序固定、`exch_ns` 取数据、
-  段头 `created_ns=0`。同一输入跑两遍逐字节一致。csv↔json↔shm 经定点往返**数值无损**(尾随零归一,如 68.80→68.8)。
+- **可复现**:`realtime=0` 下,shm 段产出逐字节确定——归并序固定、`exch_ns` 取数据、
+  段头 `created_ns=0`。同一输入跑两遍逐字节一致。csv/json 经定点编码 → shm 段**数值无损**(尾随零归一,如 68.80→6880@scale2)。
 - **内存:流式逐行读,峰值与文件大小/总行数无关(实测 266MB 输入仅 ~0MB 已提交堆)**。每源持一个常开文件
   句柄、只缓冲 1 条记录 → 多天数据全放一个目录**单次连续回放不 OOM**(一个连续时钟,跨天节奏无缝)。
   唯一随**文件数**线性涨的是文件句柄(受 `ulimit -n`,默认 1024);单次跑 >1000 个文件时 `ulimit -n 4096`。
@@ -132,6 +127,6 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
 - **广播环不背压**:`shm` 的 trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量
   会绕圈覆盖(消费者只能拿到最近一圈)。要让消费者无损跟上,用 `realtime=1.0` 真盘节奏。
 - 段头自校验:attach 既有段时比对 magic/version/entry_size/capacity/schema_hash,不符拒启动。
-- **book→shm 按档数选段**:1 档写 BBO `Board`(`BoardSlot` 64B),5 档写 `DepthBoard`(`DepthSlot` 128B,
-  5 档价量)。两者靠 `entry_size` + 独立 `schema_hash` 区分,消费者据此自校验。
-- `trade.h` 是最小占位,待行情团队统一版覆盖时,加一个 `output` 编码器即可切换,核心不动。
+- **book→`BookTickBoard`(单档 BBO,gconf v1.2.2)**:按 `slot[lid]` 写,`claim_if_newer(update_id)` 去重
+  (非递增的不写段、计 `deduped` 收尾 WARN);多档输入只取 L0。深档(10/15/20/25)待 gconf 出多档段。
+- `trade` 暂留旧 vendored `TradeRing`(v1.2.2 无 market trade 段);待 gconf 统一后切新段,核心不动。

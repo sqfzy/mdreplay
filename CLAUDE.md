@@ -32,12 +32,9 @@ bash booktick_e2e.sh                          # 端到端:拟真 book → BookTi
 - **单测无 per-test 过滤**:`test/test_main.cpp` 是单一二进制,`main()` 顺序调 `test_fixed` / `test_clock` / `test_signal` / `test_merge` / `test_config` / `test_e2e` / `test_file_io` / `test_csv_quoting` / `test_skip_reasons` / `test_book_depth5` 等。要只跑一个,临时在 `main()` 注释掉其余调用(别引入测试框架,保持同 cpp 工程 `test_core` 的极简风格)。
 
 ```bash
-# 回放 book → shm(尽快、可复现);trade 需另跑一遍(单入单出)。book 档数(1/5)由输入自动识别
-./build/linux/x86_64/release/mdreplay --kind book  --output.format shm --output.path /shm_bybit_lin_book_v2  --realtime 0
-./build/linux/x86_64/release/mdreplay --kind trade --output.format shm --output.path /shm_bybit_lin_trade_v2 --realtime 0
-
-# 格式转换:book csv → json 文件(文件输出忽略 realtime,恒按尽快)
-./build/linux/x86_64/release/mdreplay --kind book --output.format json --output.path out.book.json
+# 回放 book → BookTickBoard 段(尽快、可复现);trade 需另跑一遍(单入单出)。book 输入需带 update_id 列
+./build/linux/x86_64/release/mdreplay --kind book  --output.path /shm_bybit_lin_book_tick --output.create true --realtime 0
+./build/linux/x86_64/release/mdreplay --kind trade --output.path /shm_bybit_lin_trade    --output.create true --realtime 0
 ```
 
 测试数据 `datas/*.{book,trade}.csv` 由 mdreplay **之外**的导出器(`../formatted_to_datas.py`,`--depth 1|5` 选档数)生成,不属于本项目契约。
@@ -48,12 +45,12 @@ bash booktick_e2e.sh                          # 端到端:拟真 book → BookTi
 
 `[output]` 是 **`path`(shm 段名,/开头)+ `create`(建段/attach)**。输出恒为 shm(format 字段已删)。
 
-## 架构:三段式 + 双格式轴(读多个文件才能拼出的大图)
+## 架构:三段式(输入双格式 → shm 输出)(读多个文件才能拼出的大图)
 
 ```
-input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
- csv / json       merge / clock / window     shm(board/ring) / csv / json
-   ↓ 解析 Record       ↓ 全局有序 + 限速          ↓ 编码 Record
+input/<fmt>  →  core(归并 + 节奏)  →  output(shm)
+ csv / json       merge / clock / window     BookTickBoard(book)/ TradeRing(trade)
+   ↓ 解析 Record       ↓ 全局有序 + 限速          ↓ 写 gconf v1.2.2 段
 ```
 
 **`Record`(`core/record.hpp`)是三段解耦的命脉** —— 格式无关的中间语:输入 seam 产出它、输出 seam 消费它、核心只搬运它。价/量以**定点 mantissa(`uint32 ×10^scale`)**承载,**绝不走 double**;精度沿用数据本身(由字符串小数位推得)。book 携带 `depth`(1 或 5)+ `bid/ask_px/qty` 为 `array<u32, kMaxDepth=5>`(0=最优档);**全档共用单一 `price_scale`/`qty_scale`**。`depth=1` 即 BBO,与旧契约逐字一致。
@@ -72,8 +69,8 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 
 ## 必须知道的铁律(踩了就对不齐/连不上)
 
-1. **可复现是核心卖点**:`realtime=0`(尽快)下产出**逐字节确定** —— 归并序固定、`exch_ns` 取数据值、段头 `created_ns=0`。同一输入跑两遍逐字节一致;csv↔json↔shm 经定点往返**数值无损**(尾随零归一,68.80→68.8)。改动**任何**影响归并序、定点编码、段头初值的代码,都可能破坏这一保证 —— 改完务必重跑两遍对比字节。
-2. **文件输出忽略 realtime**:`main` 检测到 `output.format != shm` 且 `realtime > 0` 时强制归 0 并 WARN(原速写文件白等没意义)。
+1. **可复现是核心卖点**:`realtime=0`(尽快)下产出**逐字节确定** —— 归并序固定、`exch_ns` 取数据值、段头 `created_ns=0`。同一输入跑两遍逐字节一致;csv/json 经定点编码 → shm 段**数值无损**(尾随零归一,68.80→6880@scale2)。改动**任何**影响归并序、定点编码、段头初值的代码,都可能破坏这一保证 —— 改完务必重跑两遍对比字节。
+2. **book 必带 update_id + 去重可观测**:book 输入必有 `update_id` 列/字段(交易所盘口序号真值);写段经 `claim_if_newer`,**非递增(≤已记录)的不写段**——BookSink 计 `deduped` 数,`on_finish` >0 则 WARN(clean 回放恒 0,>0 = 输入 update_id 有重复/倒退)。别静默吞掉去重(`done` 计数含被去重的,WARN 是唯一信号)。
 3. **广播环不背压**:trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量会**绕圈覆盖**(消费者只拿到最近一圈)。要让消费者无损跟上,用 `realtime=1.0` 真盘节奏。
 4. **错误分层 + 跳过分类(`core/error.hpp` + `core/skip.hpp`)**:可恢复的**逐行**错误由调用方 **按原因计数跳过、不断流**(`SkipStats` 分 `Malformed/BadTimestamp/BadField/UnknownSymbol/BadNumber/ScaleOverflow`,结束打分类汇总 + 未知符号去重 WARN);不可恢复的**启动期**错误(配置/建段)经 `Result<Error>` 上抛 main 转非零退出。`make_*_record` 返回 `expected<Record, SkipReason>` 把「为什么跳」从构建层带到归账层。新增逻辑沿用这条分界,别让坏行中断回放、也别让坏配置带病启动、别把跳过又折叠回单一计数。
 5. **shm attach 自校验**:`create=false` 连既有段时比对 magic/version/entry_size/capacity/schema_hash(`SchemaDrift` 容忍,其余拒启动)。`create=true` 走 `O_TRUNC` 清零重建(幂等)。
