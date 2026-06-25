@@ -350,7 +350,8 @@ static void test_skip_reasons() {
   fs::remove_all(dir);
 }
 
-// 五档:depth=5 解析全 5 档、csv 往返无损;且只 1/5 两种——depth=5 喂 1 档文件须 CsvSchema 失败(不截断)。
+// 五档:depth=5 解析全 5 档、csv 往返无损(输出端 depth>1 走 DepthBoard,见 test_depth_board);
+// 档数只认 {1,5,10,15,20,25}——残缺档(只到 _2)须 BookDepthUnsupported 失败(不截断)。
 static void test_book_depth5() {
   using namespace mdreplay;
   namespace fs = std::filesystem;
@@ -365,7 +366,7 @@ static void test_book_depth5() {
     o << "1000,SOLUSDT,555,68.84,10,68.85,20,68.83,11,68.86,21,68.82,12,68.87,22,"
          "68.81,13,68.88,23,68.80,14,68.89,24\n";
   }
-  // 5 档表头 → 自动识别 depth=5,逐档正确(输入仍解析多档;输出端 BBO 取 L0)
+  // 5 档表头 → 自动识别 depth=5,逐档正确(输入解析全档;输出端走 DepthBoard 写全档)
   {
     SkipStats  sk;
     const auto src = load_csv_source(p, Kind::Book, sk);
@@ -564,15 +565,52 @@ static void test_overflow_and_badvalue() {
   fs::remove_all(dir);
 }
 
-// book_depth_of:档数判定唯一真相源,纯逻辑穷举(1 / 5 / 残缺 / 中缺 / >5)。
+// book_depth_of:档数判定唯一真相源,纯逻辑穷举({1,5,10,15,20,25} 受支持 / 残缺 / 中缺 / 越界)。
 static void test_book_depth_of() {
   using namespace mdreplay;
+  const auto upto = [](std::size_t hi) { return [hi](std::size_t k) { return k >= 1 && k <= hi; }; };
+  // 受支持档:_1.._(d-1) 连续齐 → d 档
   CHECK(book_depth_of([](std::size_t) { return false; }) == std::optional<std::size_t>{1});  // 无高档→1
-  CHECK(book_depth_of([](std::size_t k) { return k >= 1 && k <= 4; }) ==
-        std::optional<std::size_t>{5});                                                       // _1.._4→5
-  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k == 2; }).has_value());          // 残缺(只到_2)
-  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k == 3 || k == 4; }).has_value()); // 中缺_2
-  CHECK(!book_depth_of([](std::size_t k) { return k >= 1 && k <= 5; }).has_value());           // 含_5 >5
+  CHECK(book_depth_of(upto(4))  == std::optional<std::size_t>{5});    // _1.._4 → 5
+  CHECK(book_depth_of(upto(9))  == std::optional<std::size_t>{10});   // _1.._9 → 10
+  CHECK(book_depth_of(upto(14)) == std::optional<std::size_t>{15});   // _1.._14 → 15
+  CHECK(book_depth_of(upto(19)) == std::optional<std::size_t>{20});   // _1.._19 → 20
+  CHECK(book_depth_of(upto(24)) == std::optional<std::size_t>{25});   // _1.._24 → 25(= kMaxDepth)
+  // 不受支持/畸形:全拒(不截断)
+  CHECK(!book_depth_of(upto(2)).has_value());   // 6 档?实为 depth=3 ∉ 集 → 拒(残缺到_2)
+  CHECK(!book_depth_of(upto(5)).has_value());   // depth=6 ∉ 集
+  CHECK(!book_depth_of(upto(25)).has_value());  // depth=26 > kMaxDepth → 拒
+  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k == 3 || k == 4; }).has_value());  // 中缺_2
+  CHECK(!book_depth_of([](std::size_t k) { return k == 1 || k >= 5; }).has_value());            // 跳档(_2.._4 缺)
+}
+
+// 多档 Record → DepthSink → DepthBoard 写全档 + 读回逐档核对;claim_if_newer 去重(陈旧 update_id 不覆盖)。
+static void test_depth_board() {
+  using namespace mdreplay;
+  Record r;
+  r.kind = Kind::Book; r.ts_ns = 7000; r.update_id = 100; r.gid = 19;
+  r.price_scale = 2; r.qty_scale = 0; r.depth = 10;
+  for (std::size_t k = 0; k < 10; ++k) {  // 10 档:bid 递减、ask 递增,量各异
+    r.bid_px[k] = 6884 - k; r.bid_qty[k] = 10 + k; r.ask_px[k] = 6885 + k; r.ask_qty[k] = 20 + k;
+  }
+  auto      board = std::make_unique<DepthBoard>();
+  DepthSink sink(board.get());
+  CHECK(sink.write(r).has_value());
+
+  DepthBoardSlot out;
+  CHECK(board->slot[19].read(out));
+  CHECK(out.exch_ns == 7000 && out.update_id == 100 && out.symbol_lid == 19 && out.depth == 10);
+  CHECK(out.price_scale == 2 && out.qty_scale == 0);
+  CHECK(out.bid_px[0] == 6884 && out.ask_px[0] == 6885);  // L0
+  CHECK(out.bid_px[9] == 6875 && out.ask_px[9] == 6894);  // 第 10 档
+  CHECK(out.bid_qty[9] == 19 && out.ask_qty[9] == 29);
+  CHECK(out.bid_px[10] == 0 && out.bid_px[24] == 0);      // depth 之外恒 0(定长尾档)
+
+  // claim_if_newer:陈旧 update_id(≤已记录)不覆盖,deduped 计数,段保留旧值
+  Record stale = r; stale.update_id = 99; stale.bid_px[0] = 9999;
+  CHECK(sink.write(stale).has_value());
+  CHECK(sink.deduped() == 1);
+  CHECK(board->slot[19].read(out) && out.update_id == 100 && out.bid_px[0] == 6884);  // 未被陈旧覆盖
 }
 
 // 退化文件:只有表头 → 载入成功但空源(不崩);真空文件(无表头)→ CsvSchema。
@@ -616,6 +654,7 @@ int main() {
   test_book_depth5();
   test_format_auto();
   test_book_l0_to_shm();
+  test_depth_board();
   test_json_depth5();
   test_overflow_and_badvalue();
   if (g_fail == 0) std::printf("all tests passed\n");

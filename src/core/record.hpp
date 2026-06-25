@@ -15,8 +15,9 @@ namespace mdreplay {
 
 enum class Kind : std::uint8_t { Book, Trade };
 
-// book 最大档数。shm DepthBoard 段按此定长(POD 段须编译期定长);输入档数 >kMaxDepth 截断。
-inline constexpr std::size_t kMaxDepth = 5;
+// book 最大档数。shm DepthBoard 段按此定长(POD 段须编译期定长)。
+// 受支持档数 {1,5,10,15,20,25}(见 record_build.hpp::book_depth_of),最大 25 即本常量。
+inline constexpr std::size_t kMaxDepth = 25;
 
 struct Record {
   std::int64_t  ts_ns{0};            // epoch 纳秒(= gconf exch_ns)
