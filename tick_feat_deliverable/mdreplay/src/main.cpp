@@ -3,6 +3,7 @@
 // 一次只一种(book 或 trade);两者都要就跑两遍(改 --kind 与 --output.*)。
 // 编排:解析参数 → 加载配置 → 开一个输出 → 载入该类输入并归并 → 按节奏回放。
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -52,6 +53,8 @@ void print_usage() {
       "  --realtime <0~1>                节奏:1=原速,0.5=2×,0=尽快可复现\n"
       "  --start \"YYYY-MM-DD HH:MM:SS\"    时间窗起(UTC,留空=最早)\n"
       "  --end   \"YYYY-MM-DD HH:MM:SS\"    时间窗止(UTC,闭区间)\n"
+      "  --anchor.data_ts   <ts>         时序锚·数据原点(UTC datetime 或 epoch ns)\n"
+      "  --anchor.system_ts <ts>         时序锚·墙钟(同 data_ts);两者成对=启用跨进程同钟\n"
       "  --output.format <shm|csv|json>  去向 (output.format)\n"
       "  --output.path <dest>            去向定位:shm 段名(/开头)或输出文件路径\n"
       "  --output.create <true|false>    建段(true)/attach(false)(format=shm)\n"
@@ -111,6 +114,7 @@ void print_usage() {
 [[nodiscard]] std::optional<Config> load_with_overrides(int argc, char** argv) {
   std::string                config_path = "config.toml";
   std::optional<std::string> ov_format, ov_dir, ov_kind, ov_start, ov_end, ov_log;
+  std::optional<std::string> ov_anchor_data, ov_anchor_sys;
   std::optional<double>      ov_realtime;
   std::optional<int>         ov_progress;
   std::vector<std::pair<std::string, std::string>> out_ovr;
@@ -132,6 +136,8 @@ void print_usage() {
     else if (a == "--progress-sec") {
       if (!(ov_progress = parse_int(next()))) { spdlog::error("--progress-sec 需整数"); return std::nullopt; }
     }
+    else if (a == "--anchor.data_ts") ov_anchor_data = next();
+    else if (a == "--anchor.system_ts") ov_anchor_sys = next();
     else if (a.starts_with("--output."))
       out_ovr.emplace_back(a.substr(std::string_view("--output.").size()), next());
     else { spdlog::error("unknown arg: {} (--help 查看用法)", a); return std::nullopt; }
@@ -161,6 +167,30 @@ void print_usage() {
   }
   for (const auto& [key, val] : out_ovr)
     if (!apply_output(*cfg, key, val)) return std::nullopt;
+
+  // anchor:CLI 覆盖/启用。data_ts 与 system_ts 必须成对(完整映射才能定一条线);只给一半 → 报错。
+  {
+    std::optional<std::int64_t> data = cfg->anchor ? std::optional(cfg->anchor->data_ts_ns) : std::nullopt;
+    std::optional<std::int64_t> sys  = cfg->anchor ? std::optional(cfg->anchor->system_ts_ns) : std::nullopt;
+    if (ov_anchor_data) {
+      if (!(data = mdreplay::parse_anchor_value(*ov_anchor_data))) {
+        spdlog::error("--anchor.data_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)");
+        return std::nullopt;
+      }
+    }
+    if (ov_anchor_sys) {
+      if (!(sys = mdreplay::parse_anchor_value(*ov_anchor_sys))) {
+        spdlog::error("--anchor.system_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)");
+        return std::nullopt;
+      }
+    }
+    if (data.has_value() != sys.has_value()) {
+      spdlog::error("anchor 映射不完整:data_ts 与 system_ts 必须同时给(同步需要完整的 数据时刻↔墙钟 锚点);"
+                    "都不给则不同步(默认各锚首事件)");
+      return std::nullopt;
+    }
+    cfg->anchor = (data && sys) ? std::optional(mdreplay::AnchorCfg{*data, *sys}) : std::nullopt;
+  }
 
   // 覆盖后复校验(CLI 可能注入非法值)
   if (cfg->realtime < 0.0 || cfg->realtime > 1.0) {
@@ -262,8 +292,10 @@ load_sources(const Config& cfg, Kind kind, mdreplay::SkipStats& skips) {
 
 void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> sources,
             mdreplay::Sink& sink, const mdreplay::SkipStats& skips) {
+  std::optional<mdreplay::Clock::Anchor> anchor;
+  if (cfg.anchor) anchor = mdreplay::Clock::Anchor{cfg.anchor->data_ts_ns, cfg.anchor->system_ts_ns};
   mdreplay::Merger   merger(std::move(sources), cfg.start_ns, cfg.end_ns);
-  mdreplay::Clock    clock(cfg.realtime);
+  mdreplay::Clock    clock(cfg.realtime, anchor);
   mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
   while (!mdreplay::stop_requested()) {
     const auto rec = merger.next();
@@ -306,6 +338,21 @@ int main(int argc, char** argv) {
   if (cfg->output.format != "shm" && cfg->realtime > 0.0) {
     spdlog::warn("文件输出忽略 realtime={},按尽快回放", cfg->realtime);
     cfg->realtime = 0.0;
+  }
+
+  // 时序锚:仅 realtime>0 生效;realtime=0/文件输出下忽略(本就不限速)。提示 + 过去则告知 burst。
+  if (cfg->anchor) {
+    if (cfg->realtime <= 0.0) {
+      spdlog::info("anchor 已配置,但 realtime=0/文件输出 → 本次忽略(不限速)");
+    } else {
+      const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+      spdlog::info("anchor 启用:data_ts={}ns ↔ system_ts={}ns(多进程填同值 + 同 realtime 即同钟)",
+                   cfg->anchor->data_ts_ns, cfg->anchor->system_ts_ns);
+      if (cfg->anchor->system_ts_ns < now_ns)
+        spdlog::warn("anchor.system_ts 在过去 → 早于当下的事件将快进(burst);喂 trade 广播环时建议设未来时刻");
+    }
   }
 
   // 先载入(book 自动识别档数,写进 Record.depth),再据探测到的档数开输出(选 Board/DepthBoard、定 csv 表头)。

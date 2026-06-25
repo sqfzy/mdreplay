@@ -53,7 +53,7 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 **`Record`(`core/record.hpp`)是三段解耦的命脉** —— 格式无关的中间语:输入 seam 产出它、输出 seam 消费它、核心只搬运它。价/量以**定点 mantissa(`uint32 ×10^scale`)**承载,**绝不走 double**;精度沿用数据本身(由字符串小数位推得)。book 携带 `depth`(1 或 5)+ `bid/ask_px/qty` 为 `array<u32, kMaxDepth=5>`(0=最优档);**全档共用单一 `price_scale`/`qty_scale`**。`depth=1` 即 BBO,与旧契约逐字一致。
 
 - **`input/`**:按格式可插拔的**流式**解析器。`discover.hpp` 扫目录挑 `*.<kind>.<fmt>` 并**按路径排序**(固定源序 = 确定性归并的基础);`csv.hpp`(手写 getline+切分)/ `json.hpp`(nlohmann)表头/字段驱动解析,**各自实现 `Source`**(`StreamingCsvSource`/`StreamingJsonSource`,`source.hpp` 的 `peek/advance` 游标契约)——`advance()` 才惰性读下一行、**只缓冲 1 条**,峰值内存与文件大小无关;`record_build.hpp` 是 csv/json **共用**的「字段串 → Record」逻辑(symbol→gid + fixed 编码,失败返回**分类的** `SkipReason`)。坏/未知行在**消费期**(advance)按原因归账到 `SkipStats`(故 `main` 的 `log_summary` 在 replay 后打)。**book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键→1;`_1.._4` 齐且无 `_5`→5;残缺/>5→拒(csv 拒整文件 / json 跳行),**绝不截断**。**加一种输入格式 = 加一个文件 + 在 main 的 `load_sources` 分叉一行**。
-- **`core/`**:格式无关回放核心。`merge.hpp` 用小顶堆做 N 路归并,序 = `(ts_ns, 源序)` 稳定 tiebreak(**通用规则,不含任何 venue 口径**);`clock.hpp` 绝对虚拟时钟(延迟 = `(ts - ts0) × realtime`,锚定首事件**不累积漂移**);`window.hpp` 时间窗 sentinel(`kNoStart/kNoEnd`);`fixed.hpp` 定点编解码;`skip.hpp` 跳过分原因统计(`SkipStats`:per-reason 计数 + 未知符号去重采样,结束 `log_summary` 打分类汇总 + WARN);`config.hpp` toml 解析 + 启动期校验;`report.hpp` 进度观测。
+- **`core/`**:格式无关回放核心。`merge.hpp` 用小顶堆做 N 路归并,序 = `(ts_ns, 源序)` 稳定 tiebreak(**通用规则,不含任何 venue 口径**);`clock.hpp` 绝对虚拟时钟(延迟 = `(ts - ts0) × realtime`,**不累积漂移**;双模式锚:默认锚首事件走 `steady_clock`,配了 `[replay].anchor` 则把 data_ts 钉到 system_ts 走 `system_clock` → 多进程同 anchor 即跨进程同钟;pacing 分块睡可被停止信号 ≤100ms 打断);`window.hpp` 时间窗 sentinel(`kNoStart/kNoEnd`);`fixed.hpp` 定点编解码;`skip.hpp` 跳过分原因统计(`SkipStats`:per-reason 计数 + 未知符号去重采样,结束 `log_summary` 打分类汇总 + WARN);`config.hpp` toml 解析 + 启动期校验;`report.hpp` 进度观测。
 - **`output/`**:按去向的编码器,统一 `Sink::write(Record)` 接口(`sink.hpp`)。`shm.hpp` 含 `ShmSegment`(POSIX shm RAII + 建段写头/连段自校验)+ `BookSink`(写 BBO `Board.slot[gid]` 的最优档,latest-wins)+ `DepthBookSink`(写 5 档 `DepthBoard.slot[gid]`)+ `TradeSink`(`TradeRing.publish`,无损广播环);`csv.hpp` / `json.hpp` 文件输出(按 `record.depth` 逐档,经 `fixed.hpp::to_decimal` 还原精度)。`main::open_output` 据**探测到的档数**选 `Board`(1)/`DepthBoard`(5)。**加一种去向 = 加一个 Sink + 在 main 的 `open_output` 分支**。
 
 > **档数流向**:`main` 先 `load_sources`(book 自动识别档数→写进 `Record.depth`),再 `detect_depth(sources)` 取首条记录的档数,据此 `open_output`(选段类型、定 csv 表头)。即「先载入、后开输出」——顺序不能反。
@@ -61,6 +61,8 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 ### 单入单出(关键约束)
 
 一次只回放**一种** kind(book 或 trade),由 `--kind` 选定;book 与 trade 都要喂下游就**跑两遍**(改 `--kind` 与 `--output.*`)。这是刻意的解耦:book 走 Board 段(状态、latest-wins),trade 走广播环(流、无损),两者契约不同,不强行合并。
+
+**跨进程同钟靠时序锚,不靠合并进程**:分进程跑会墙钟错位(各锚首事件)。配 `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`clock.hpp` 据此用 `system_clock` 算绝对目标),多进程填**同一 anchor + 同 realtime** → 对同一 ts 算同一墙钟 → 严格同钟。这样既保住单入单出解耦、又拿到时序一致(无需把 book/trade 塞进一个进程)。不写 anchor = 默认各锚首事件(`steady_clock`,单进程零负担)。
 
 ## 必须知道的铁律(踩了就对不齐/连不上)
 

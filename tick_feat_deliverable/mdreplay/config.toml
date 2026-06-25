@@ -11,6 +11,12 @@ realtime = 1.0             # 0~1:值=有多实时。1=原速(默认);0.5=2× 实
 start = ""                 # 时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
 end   = ""                 # 时间窗止(留空=最晚),闭区间
 
+# 时序锚(跨进程同钟):把数据时刻 data_ts 钉到墙钟 system_ts,任意 ts 的播出墙钟由 realtime 线性推算。
+# 注释掉 / 不写 = 不同步(默认:各锚首事件、实时从~现在起播,单进程零负担)。
+# 写了(两端齐)= 启用:book / trade / 多 venue 多进程填**同一个 anchor + 同 realtime** → 同钟。
+# 两端都收 UTC datetime("YYYY-MM-DD HH:MM:SS")或裸 epoch ns;system_ts 建议取未来,免初始 burst。
+# anchor = { data_ts = "2026-06-23 08:00:00", system_ts = "2026-06-25 14:00:00" }
+
 [output]
 format = "shm"             # shm | csv | json —— 去向
 path   = "/shm_bybit_lin_book_v2"   # 去向定位:shm=段名(/开头);csv|json=输出文件路径(如 out.book.csv)
