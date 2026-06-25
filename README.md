@@ -112,8 +112,16 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
   `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`play_wall(ts)=system_ts+(ts−data_ts)×realtime`)
   后,多进程填**同一 anchor + 同 realtime** → 对同一 ts 算出同一墙钟 → 严格同钟(跨 venue、跨机靠 NTP 亦可)。
   不写则默认各锚首事件(单进程零负担)。`system_ts` 用 `system_clock`(UTC),建议取未来几秒免初始 burst。
+  **省心法:`replay_sync.sh`** —— 给**任意 N 个**单入单出单元自动盖同一个 anchor(book/trade 只是 N=2),
+  自动算共享 `system_ts`(now+delay)与 `data_ts`(扫全局最早 ts,零 burst),Ctrl-C 一次干净停全部:
   ```bash
-  S="2026-06-23 08:00:00"; W="2026-06-25 14:00:00"   # 共享:数据窗 + 发令墙钟
+  ./replay_sync.sh --realtime 1 \
+    --run "--kind book  --dir formatted_2h --output.path /shm_book" \
+    --run "--kind trade --dir formatted_2h --output.path /shm_trade"
+  ```
+  手工等价(两进程填同一 `anchor`):
+  ```bash
+  S="2026-06-23 08:00:00"; W="2026-06-25 14:00:00"   # 共享:数据原点 + 发令墙钟
   mdreplay --kind book  --output.path /shm_book  --realtime 1 --anchor.data_ts "$S" --anchor.system_ts "$W" &
   mdreplay --kind trade --output.path /shm_trade --realtime 1 --anchor.data_ts "$S" --anchor.system_ts "$W" &
   ```

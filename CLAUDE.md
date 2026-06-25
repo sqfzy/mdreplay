@@ -62,7 +62,7 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 
 一次只回放**一种** kind(book 或 trade),由 `--kind` 选定;book 与 trade 都要喂下游就**跑两遍**(改 `--kind` 与 `--output.*`)。这是刻意的解耦:book 走 Board 段(状态、latest-wins),trade 走广播环(流、无损),两者契约不同,不强行合并。
 
-**跨进程同钟靠时序锚,不靠合并进程**:分进程跑会墙钟错位(各锚首事件)。配 `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`clock.hpp` 据此用 `system_clock` 算绝对目标),多进程填**同一 anchor + 同 realtime** → 对同一 ts 算同一墙钟 → 严格同钟。这样既保住单入单出解耦、又拿到时序一致(无需把 book/trade 塞进一个进程)。不写 anchor = 默认各锚首事件(`steady_clock`,单进程零负担)。
+**跨进程同钟靠时序锚,不靠合并进程**:分进程跑会墙钟错位(各锚首事件)。配 `[replay].anchor = { data_ts, system_ts }`(把数据时刻钉到墙钟,`clock.hpp` 据此用 `system_clock` 算绝对目标),多进程填**同一 anchor + 同 realtime** → 对同一 ts 算同一墙钟 → 严格同钟。这样既保住单入单出解耦、又拿到时序一致(无需把 book/trade 塞进一个进程)。不写 anchor = 默认各锚首事件(`steady_clock`,单进程零负担)。`replay_sync.sh` 是配套启动器:给**任意 N 个**单元(`--run "..."` 可重复)自动算共享 anchor(system_ts=now+delay、data_ts=扫全局最早 ts)+ 统一 Ctrl-C,book/trade 不特判、纯通用。
 
 ## 必须知道的铁律(踩了就对不齐/连不上)
 
