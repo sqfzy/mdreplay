@@ -50,11 +50,11 @@ template <class MarkerFn>
 // 多档 book:每个 span 含 depth 档(0=最优)。全档价共用 price_scale、全档量共用 qty_scale
 // (把 bid/ask 全档拼成一组编码,对齐 slot 单 scale);depth=1 即退化为 BBO,与旧契约逐字一致。
 [[nodiscard]] inline std::expected<Record, SkipReason> make_book_record(
-    std::int64_t ts, std::string_view sym, std::span<const std::string_view> bid_px,
-    std::span<const std::string_view> bid_qty, std::span<const std::string_view> ask_px,
-    std::span<const std::string_view> ask_qty) {
-  const auto gid = gid_of(sym);
-  if (!gid) return std::unexpected(SkipReason::UnknownSymbol);
+    std::int64_t ts, std::uint64_t update_id, std::string_view sym,
+    std::span<const std::string_view> bid_px, std::span<const std::string_view> bid_qty,
+    std::span<const std::string_view> ask_px, std::span<const std::string_view> ask_qty) {
+  const auto lid = lid_of(sym);  // book 段按 LID 索引 slot
+  if (!lid) return std::unexpected(SkipReason::UnknownSymbol);
   const std::size_t depth = bid_px.size();  // 调用方保证 4 个 span 等长且 ∈[1,kMaxDepth]
 
   // 价组 = [bid0..bid_{d-1}, ask0..ask_{d-1}];量组同序。
@@ -72,7 +72,8 @@ template <class MarkerFn>
   Record r;
   r.kind        = Kind::Book;
   r.ts_ns       = ts;
-  r.gid         = *gid;
+  r.update_id   = update_id;
+  r.gid         = *lid;
   r.depth       = static_cast<std::uint8_t>(depth);
   r.price_scale = *psc;
   r.qty_scale   = *qsc;

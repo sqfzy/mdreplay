@@ -68,6 +68,7 @@ private:
           skips_->add(SkipReason::BadField);
           return std::nullopt;
         }
+        const auto        upd   = j.at("update_id").get<std::uint64_t>();  // 缺失 → 异常 → BadField
         const std::size_t depth = *d;
         for (std::size_t k = 0; k < depth; ++k) {
           const std::string s = (k == 0) ? "" : "_" + std::to_string(k);
@@ -76,7 +77,7 @@ private:
           sapx_[k]  = j.at("ask_px" + s).get<std::string>();  apx_[k]  = sapx_[k];
           saqty_[k] = j.at("ask_qty" + s).get<std::string>(); aqty_[k] = saqty_[k];
         }
-        rec = make_book_record(ts, sym, std::span(bpx_).first(depth), std::span(bqty_).first(depth),
+        rec = make_book_record(ts, upd, sym, std::span(bpx_).first(depth), std::span(bqty_).first(depth),
                                std::span(apx_).first(depth), std::span(aqty_).first(depth));
       } else {
         rec = make_trade_record(ts, sym, j.at("side").get<std::int64_t>(),

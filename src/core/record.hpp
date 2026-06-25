@@ -20,7 +20,8 @@ inline constexpr std::size_t kMaxDepth = 5;
 
 struct Record {
   std::int64_t  ts_ns{0};            // epoch 纳秒(= gconf exch_ns)
-  std::uint16_t gid{0};              // gconf global_symbol_id
+  std::uint64_t update_id{0};        // 交易所盘口更新序号(book 段 BookTickBoard 需真值;trade 不用)
+  std::uint16_t gid{0};              // gconf 符号 id(book 用作 LID 索引 slot、trade 用作 GID)
   Kind          kind{Kind::Book};
   std::uint8_t  price_scale{0};      // 价定点指数(数据天然精度,全档共用)
   std::uint8_t  qty_scale{0};        // 量定点指数(全档共用)

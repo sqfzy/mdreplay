@@ -18,10 +18,9 @@
 
 #include <spdlog/spdlog.h>
 
-#include <gconf/shm/v2/board.h>
-#include <gconf/shm/v2/depth_board.h>
+#include <gconf/shm/v2/booktick_board.h>
 #include <gconf/shm/v2/seg_header.h>
-#include <gconf/shm/v2/trade.h>
+#include <gconf/shm/v2/trade.h>  // 临时:gconf v1.2.2 无 market trade 段,暂用旧 vendored TradeRing
 
 #include "core/error.hpp"
 #include "core/record.hpp"
@@ -98,34 +97,23 @@ private:
   int         fd_{-1};
 };
 
+// Book Record → BookTickBoard.slot[lid] 写 BBO(最优档)。gconf v1.2.2 行情段只有单档 book tick,
+// 输入若多档则只取 L0(截断)。先 claim_if_newer(update_id 真值)赢得本槽再 write(单写者天然赢;
+// 若遇非递增的陈旧 update_id 则跳过,符合"只接受更新的盘口版本"语义)。延迟字段回放无 → 0。
 class BookSink : public Sink {
 public:
-  explicit BookSink(gconf::shm::v2::Board* board) : board_(board) {}
+  explicit BookSink(gconf::shm::v2::BookTickBoard* board) : board_(board) {}
   Result<void> write(const Record& r) override {
-    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns),       // update_id = ts(单调)
-                              r.bid_px[0], r.bid_qty[0], r.ask_px[0], r.ask_qty[0],  // BBO = 最优档
-                              0, 0, 0,                                              // 延迟:回放无
-                              r.gid, r.price_scale, r.qty_scale, 0 /*path_idx*/);
+    std::uint64_t replaced_old = 0;
+    if (board_->claim_if_newer(r.gid, r.update_id, replaced_old))  // r.gid 即 LID
+      board_->slot[r.gid].write(r.ts_ns, r.update_id, r.bid_px[0], r.bid_qty[0], r.ask_px[0],
+                                r.ask_qty[0], 0, 0, 0,  // kernel/shm/E 延迟:回放无
+                                r.gid, r.price_scale, r.qty_scale, 0 /*path_idx*/);
     return {};
   }
 
 private:
-  gconf::shm::v2::Board* board_;
-};
-
-// 五档 book → DepthBoard.slot[gid](latest-wins;Record 的 5 档定点数组直写)。
-class DepthBookSink : public Sink {
-public:
-  explicit DepthBookSink(gconf::shm::v2::DepthBoard* board) : board_(board) {}
-  Result<void> write(const Record& r) override {
-    board_->slot[r.gid].write(r.ts_ns, static_cast<std::uint64_t>(r.ts_ns), r.bid_px.data(),
-                              r.bid_qty.data(), r.ask_px.data(), r.ask_qty.data(), r.gid,
-                              r.price_scale, r.qty_scale, r.depth);
-    return {};
-  }
-
-private:
-  gconf::shm::v2::DepthBoard* board_;
+  gconf::shm::v2::BookTickBoard* board_;
 };
 
 class TradeSink : public Sink {

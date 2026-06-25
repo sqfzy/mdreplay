@@ -15,9 +15,9 @@
 
 #include <spdlog/spdlog.h>
 
-#include <gconf/domain/symbols.h>
-#include <gconf/shm/v2/board.h>
+#include <gconf/shm/v2/booktick_board.h>
 #include <gconf/shm/v2/trade.h>
+#include <gconf/symbol/symbol_idx.h>
 
 #include "core/clock.hpp"
 #include "core/config.hpp"
@@ -30,8 +30,6 @@
 #include "input/discover.hpp"
 #include "input/json.hpp"
 #include "input/source.hpp"
-#include "output/csv.hpp"
-#include "output/json.hpp"
 #include "output/shm.hpp"
 #include "output/sink.hpp"
 
@@ -55,9 +53,8 @@ void print_usage() {
       "  --end   \"YYYY-MM-DD HH:MM:SS\"    时间窗止(UTC,闭区间)\n"
       "  --anchor.data_ts   <ts>         时序锚·数据原点(UTC datetime 或 epoch ns)\n"
       "  --anchor.system_ts <ts>         时序锚·墙钟(同 data_ts);两者成对=启用跨进程同钟\n"
-      "  --output.format <shm|csv|json>  去向 (output.format)\n"
-      "  --output.path <dest>            去向定位:shm 段名(/开头)或输出文件路径\n"
-      "  --output.create <true|false>    建段(true)/attach(false)(format=shm)\n"
+      "  --output.path <seg>             输出 shm 段名(/开头)\n"
+      "  --output.create <true|false>    建段(true,O_TRUNC 幂等)/ attach(false)\n"
       "  --log-level <trace|debug|info|warn|error>\n"
       "  --progress-sec <n>              进度日志间隔秒\n"
       "  --help                          显示本帮助");
@@ -98,14 +95,13 @@ void print_usage() {
 
 // 应用 "--output.<key> <val>" 覆盖到 cfg.output(镜像 [output] 表路径)。
 [[nodiscard]] bool apply_output(Config& cfg, std::string_view key, const std::string& val) {
-  if (key == "format") cfg.output.format = val;
-  else if (key == "path") cfg.output.path = val;
+  if (key == "path") cfg.output.path = val;
   else if (key == "create") {
     const auto b = parse_bool(val);
     if (!b) { spdlog::error("--output.create 需 true/false"); return false; }
     cfg.output.create = *b;
   } else {
-    spdlog::error("--output.{} 未知键(应为 format/path/create)", key);
+    spdlog::error("--output.{} 未知键(应为 path/create)", key);
     return false;
   }
   return true;
@@ -209,12 +205,7 @@ void print_usage() {
     spdlog::error("input.kind 须 book/trade(得到 '{}')", cfg->input_kind);
     return std::nullopt;
   }
-  const auto& o = cfg->output;
-  if (o.format != "shm" && o.format != "csv" && o.format != "json") {
-    spdlog::error("output.format 须 shm/csv/json(得到 '{}')", o.format);
-    return std::nullopt;
-  }
-  if (o.path.empty()) { spdlog::error("output.path 不能为空"); return std::nullopt; }
+  if (cfg->output.path.empty()) { spdlog::error("output.path(shm 段名)不能为空"); return std::nullopt; }
   return *cfg;
 }
 
@@ -224,41 +215,24 @@ struct Output {
   std::unique_ptr<mdreplay::Sink> sink;
 };
 
-// depth = 输入自动识别的档数(1 或 5),决定 book→shm 用 Board 还是 DepthBoard、csv 表头档数。
-[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind, std::size_t depth) {
+// 输出恒为 shm(gconf v1.2.2 生产段):book → BookTickBoard(单档 BBO,输入多档则取 L0);
+// trade → TradeRing(临时旧段,待 gconf 出 market trade 段)。段容量 = N_SYMS(板按 LID 索引)。
+[[nodiscard]] Result<Output> open_output(const Config& cfg, Kind kind) {
   const auto& o = cfg.output;
-  if (o.format == "shm") {
-    if (kind == Kind::Book && depth == 5) {  // 五档 → DepthBoard 段
-      auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::DepthBoard), v2::SegKind::Board,
-                                            sizeof(v2::DepthSlot), gconf::sym::N_GLOBAL_SYMBOL_IDS,
-                                            v2::kDepthBoardSchemaHash, o.create);
-      if (!seg) return std::unexpected(seg.error());
-      auto* board = reinterpret_cast<v2::DepthBoard*>(seg->base());
-      return Output{std::move(*seg), std::make_unique<mdreplay::DepthBookSink>(board)};
-    }
-    if (kind == Kind::Book) {  // BBO → Board 段
-      auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::Board), v2::SegKind::Board,
-                                            sizeof(v2::BoardSlot), gconf::sym::N_GLOBAL_SYMBOL_IDS,
-                                            v2::kBoardSchemaHash, o.create);
-      if (!seg) return std::unexpected(seg.error());
-      auto* board = reinterpret_cast<v2::Board*>(seg->base());
-      return Output{std::move(*seg), std::make_unique<mdreplay::BookSink>(board)};
-    }
-    auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::TradeRing), v2::SegKind::BcastRing,
-                                          sizeof(v2::TradeEntry), v2::TRADE_RING_CAP,
-                                          v2::kTradeSchemaHash, o.create);
+  if (kind == Kind::Book) {
+    auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::BookTickBoard), v2::SegKind::Board,
+                                          sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS,
+                                          v2::kBoardSchemaHash, o.create);
     if (!seg) return std::unexpected(seg.error());
-    auto* ring = reinterpret_cast<v2::TradeRing*>(seg->base());
-    return Output{std::move(*seg), std::make_unique<mdreplay::TradeSink>(ring)};
+    auto* board = reinterpret_cast<v2::BookTickBoard*>(seg->base());
+    return Output{std::move(*seg), std::make_unique<mdreplay::BookSink>(board)};
   }
-  if (o.format == "csv") {
-    auto s = mdreplay::CsvSink::open(o.path, kind, depth);
-    if (!s) return std::unexpected(s.error());
-    return Output{{}, std::move(*s)};
-  }
-  auto s = mdreplay::JsonSink::open(o.path, kind);  // json:逐行按 record.depth 写,无需建表头
-  if (!s) return std::unexpected(s.error());
-  return Output{{}, std::move(*s)};
+  auto seg = mdreplay::ShmSegment::open(o.path, sizeof(v2::TradeRing), v2::SegKind::BcastRing,
+                                        sizeof(v2::TradeEntry), v2::TRADE_RING_CAP,
+                                        v2::kTradeSchemaHash, o.create);
+  if (!seg) return std::unexpected(seg.error());
+  auto* ring = reinterpret_cast<v2::TradeRing*>(seg->base());
+  return Output{std::move(*seg), std::make_unique<mdreplay::TradeSink>(ring)};
 }
 
 // 从已载入的源头探测档数(book 自动识别后写进 Record.depth):取首个非空源的首条记录定档;
@@ -352,16 +326,10 @@ int main(int argc, char** argv) {
     spdlog::info("input.format=auto → 识别为 {}", cfg->input_format);
   }
 
-  // 文件输出无节奏意义:忽略 realtime,按尽快回放(避免原速写文件白等)。
-  if (cfg->output.format != "shm" && cfg->realtime > 0.0) {
-    spdlog::warn("文件输出忽略 realtime={},按尽快回放", cfg->realtime);
-    cfg->realtime = 0.0;
-  }
-
-  // 时序锚:仅 realtime>0 生效;realtime=0/文件输出下忽略(本就不限速)。提示 + 过去则告知 burst。
+  // 时序锚:仅 realtime>0 生效;realtime=0 下忽略(本就不限速)。提示 + 过去则告知 burst。
   if (cfg->anchor) {
     if (cfg->realtime <= 0.0) {
-      spdlog::info("anchor 已配置,但 realtime=0/文件输出 → 本次忽略(不限速)");
+      spdlog::info("anchor 已配置,但 realtime=0 → 本次忽略(不限速)");
     } else {
       const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::system_clock::now().time_since_epoch())
@@ -378,27 +346,22 @@ int main(int argc, char** argv) {
     }
   }
 
-  // 先载入(book 自动识别档数,写进 Record.depth),再据探测到的档数开输出(选 Board/DepthBoard、定 csv 表头)。
   mdreplay::SkipStats skips;
   auto                sources = load_sources(*cfg, kind, skips);
   if (sources.empty()) {
     spdlog::error("no *.{}.{} under '{}'", cfg->input_kind, cfg->input_format, cfg->dir);
     return 1;
   }
-  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;
+  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;  // 仅供输入档数提示;输出恒 BBO
   spdlog::info("input: {} {} sources, kind={}, depth={}, realtime={}, window=[{}..{}]", sources.size(),
                cfg->input_format, cfg->input_kind, depth, cfg->realtime, cfg->start_ns, cfg->end_ns);
 
-  auto out = open_output(*cfg, kind, depth);
+  auto out = open_output(*cfg, kind);
   if (!out) {
     spdlog::error("open output failed: {}", mdreplay::to_string(out.error()));
     return 1;
   }
-  if (cfg->output.format == "shm")
-    spdlog::info("output: shm → {} ({}, {} 档)", cfg->output.path,
-                 cfg->output.create ? "created" : "attached", depth);
-  else
-    spdlog::info("output: {} → {} ({} 档)", cfg->output.format, cfg->output.path, depth);
+  spdlog::info("output: shm → {} ({})", cfg->output.path, cfg->output.create ? "created" : "attached");
 
   if (!replay(*cfg, std::move(sources), *out->sink, skips)) return 1;  // anchor 不合理 → 已报错,拒启动
   out->sink->on_finish();          // 去向相关收尾(trade 环绕圈告警等)

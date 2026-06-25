@@ -19,7 +19,7 @@ die() { echo "mem_check: $*" >&2; exit 1; }
 
 # 跑一次 book 回放(realtime=0 尽快、输出 /dev/null),采峰值 RssAnon(MB)。$1=输入目录
 peak_rss_anon_mb() {
-  "$BIN" --kind book --dir "$1" --format csv --output.format csv --output.path /dev/null --realtime 0 \
+  "$BIN" --kind trade --dir "$1" --format csv --output.path /shm_memcheck --output.create true --realtime 0 \
     >/dev/null 2>&1 &
   local pid=$! hwm=0 v
   while kill -0 "$pid" 2>/dev/null; do
@@ -33,18 +33,19 @@ peak_rss_anon_mb() {
 main() {
   [ -x "$BIN" ] || die "找不到 $BIN —— 先 (cd mdreplay && xmake build mdreplay)"
   [ -d "$DATAS" ] || die "找不到测试数据目录 $DATAS"
-  local base=("$DATAS"/*.book.csv)
-  [ "${#base[@]}" -ge 1 ] || die "$DATAS 下无 *.book.csv"
+  # 用 trade(无需 update_id 列;流式 Source 与 book 同一套,内存特征一致)。
+  local base=("$DATAS"/*.trade.csv)
+  [ "${#base[@]}" -ge 1 ] || die "$DATAS 下无 *.trade.csv"
 
   # 造 3× 数据集:同目录复制 3 份不同前缀 → 总行数与文件数都 3 倍。
   local big; big="$(mktemp -d)"
-  trap 'rm -rf "$big"' EXIT
+  trap 'rm -rf "$big"; rm -f /dev/shm/shm_memcheck' EXIT
   local d f
   for d in d1 d2 d3; do
     for f in "${base[@]}"; do cp "$f" "$big/${d}_$(basename "$f")"; done
   done
 
-  echo "采样流式 book 回放峰值 RssAnon(已提交堆,OOM 相关)..."
+  echo "采样流式 trade 回放峰值 RssAnon(已提交堆,OOM 相关)..."
   local one three diff
   one=$(peak_rss_anon_mb "$DATAS")
   three=$(peak_rss_anon_mb "$big")

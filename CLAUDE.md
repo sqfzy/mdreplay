@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 这是什么
 
-`mdreplay` 是一个**独立、普适**的逐笔行情回放器:读录制的行情文件(csv/json),按时序重放到一个去向(gconf v2 **shm 段** / **csv** / **json** 文件)。主用途是给下游(特征引擎等)当实盘 WS feed 的替身;也可做格式转换 / 落盘 / 调试。
+`mdreplay` 是一个**独立、普适**的逐笔行情回放器:读录制的行情文件(csv/json 输入),按时序重放到 **gconf v1.2.2 shm 段**。主用途是给下游(特征引擎等)当实盘 WS feed 的替身。
+
+> **gconf v1.2.2 迁移(进行中)**:输出已从旧 v2 段(Board/DepthBoard/csv/json)迁到 **v1.2.2 生产段**——book → `BookTickBoard`(单档 BBO,`/shm_*_book_tick`),输出**只剩 shm**(csv/json 输出已删)。**trade 暂留旧 vendored `TradeRing`**(v1.2.2 无 market trade 段,待 gconf 统一)。**book 输入新增必填 `update_id` 列**(交易所盘口更新序号真值,写进段、claim_if_newer 去重)。符号用 v1.2.2 共享 LID 层(SOLUSDT=19;旧版是 21)。深档(10/15/20/25)待 gconf 出多档段后再做。集成测试见 `booktick_e2e.sh`。
 
 **铁律 — 零上游耦合**:本项目只认「带时间戳的记录流」,**绝不绑任何上游/下游的私有格式或口径**(连 venue 差异、tick_feat 因子口径都在它之外)。它**只依赖** gconf v2 段契约(vendored 进 `gconf/`)+ `toml++` / `spdlog` / `nlohmann_json`,**CSV 解析手写(`input/csv.hpp`),零第三方解析库**。改动时若发现自己在写 venue 专属或某下游专属逻辑,基本是放错了地方。
 
@@ -19,6 +21,7 @@ cd mdreplay
 xmake build mdreplay                          # 主程序
 xmake build test && xmake run test            # 单元 + e2e 测试(无框架,任一断言失败退出非零)
 bash mem_check.sh                             # 内存回归守门(操作级:跑二进制采 RssAnon,验流式不随数据量涨)
+bash booktick_e2e.sh                          # 端到端:拟真 book → BookTickBoard shm → 另进程按 v1.2.2 契约读回核对
 ```
 
 - **两层测试**:`xmake run test`(`test_main.cpp`,纯逻辑单元 + e2e,进程内);`mem_check.sh`(操作级,跑二进制读 `/proc` 采峰值 `RssAnon`,守住「~0MB 已提交堆与数据量无关」这一核心卖点——纯逻辑单测够不到进程级内存)。改输入加载/缓冲策略后务必跑后者。
@@ -43,7 +46,7 @@ bash mem_check.sh                             # 内存回归守门(操作级:跑
 
 `config.toml` 是基线,**每一项都有同名/同路径 CLI 覆盖**(镜像 toml 表路径,如 `[output].path` → `--output.path`)。`main.cpp::load_with_overrides` 先 `load_config` 再逐项覆盖,**覆盖后复校验**(CLI 可能注入非法值)。`--config <path>` 换配置文件,`--help` 看全部。
 
-`[output]` 是 **`format`(shm/csv/json)+ `path`(去向定位:shm=段名 /开头,csv|json=文件路径)+ `create`(仅 shm)**。`path` 是统一的去向(`shm` 与旧 `path` 已合并);book 档数不在配置里——由输入自动识别 1/5。
+`[output]` 是 **`path`(shm 段名,/开头)+ `create`(建段/attach)**。输出恒为 shm(format 字段已删)。
 
 ## 架构:三段式 + 双格式轴(读多个文件才能拼出的大图)
 
@@ -57,7 +60,7 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 
 - **`input/`**:按格式可插拔的**流式**解析器。`discover.hpp` 扫目录挑 `*.<kind>.<fmt>` 并**按路径排序**(固定源序 = 确定性归并的基础);`csv.hpp`(手写 getline+切分)/ `json.hpp`(nlohmann)表头/字段驱动解析,**各自实现 `Source`**(`StreamingCsvSource`/`StreamingJsonSource`,`source.hpp` 的 `peek/advance` 游标契约)——`advance()` 才惰性读下一行、**只缓冲 1 条**,峰值内存与文件大小无关;`record_build.hpp` 是 csv/json **共用**的「字段串 → Record」逻辑(symbol→gid + fixed 编码,失败返回**分类的** `SkipReason`)。坏/未知行在**消费期**(advance)按原因归账到 `SkipStats`(故 `main` 的 `log_summary` 在 replay 后打)。**book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键→1;`_1.._4` 齐且无 `_5`→5;残缺/>5→拒(csv 拒整文件 / json 跳行),**绝不截断**。**加一种输入格式 = 加一个文件 + 在 main 的 `load_sources` 分叉一行**。
 - **`core/`**:格式无关回放核心。`merge.hpp` 用小顶堆做 N 路归并,序 = `(ts_ns, 源序)` 稳定 tiebreak(**通用规则,不含任何 venue 口径**);`clock.hpp` 绝对虚拟时钟(延迟 = `(ts - ts0) × realtime`,**不累积漂移**;双模式锚:默认锚首事件走 `steady_clock`,配了 `[replay].anchor` 则把 data_ts 钉到 system_ts 走 `system_clock` → 多进程同 anchor 即跨进程同钟;pacing 分块睡可被停止信号 ≤100ms 打断);`window.hpp` 时间窗 sentinel(`kNoStart/kNoEnd`);`fixed.hpp` 定点编解码;`skip.hpp` 跳过分原因统计(`SkipStats`:per-reason 计数 + 未知符号去重采样,结束 `log_summary` 打分类汇总 + WARN);`config.hpp` toml 解析 + 启动期校验;`report.hpp` 进度观测。
-- **`output/`**:按去向的编码器,统一 `Sink::write(Record)` 接口(`sink.hpp`)。`shm.hpp` 含 `ShmSegment`(POSIX shm RAII + 建段写头/连段自校验)+ `BookSink`(写 BBO `Board.slot[gid]` 的最优档,latest-wins)+ `DepthBookSink`(写 5 档 `DepthBoard.slot[gid]`)+ `TradeSink`(`TradeRing.publish`,无损广播环);`csv.hpp` / `json.hpp` 文件输出(按 `record.depth` 逐档,经 `fixed.hpp::to_decimal` 还原精度)。`main::open_output` 据**探测到的档数**选 `Board`(1)/`DepthBoard`(5)。**加一种去向 = 加一个 Sink + 在 main 的 `open_output` 分支**。
+- **`output/`**:只剩 shm(`shm.hpp`),统一 `Sink::write(Record)` + `on_finish()` 接口(`sink.hpp`)。含 `ShmSegment`(POSIX shm RAII + 建段写头/连段自校验)+ `BookSink`(写 v1.2.2 `BookTickBoard.slot[lid]` 的 BBO 最优档:`claim_if_newer(update_id)` 赢了再 `write`,延迟字段回放无 → 0)+ `TradeSink`(老 `TradeRing.publish`,无损广播环,临时)。`main::open_output`:book→BookTickBoard、trade→TradeRing。**多档输入只取 L0(截断)**——v1.2.2 行情段是单档。
 
 > **档数流向**:`main` 先 `load_sources`(book 自动识别档数→写进 `Record.depth`),再 `detect_depth(sources)` 取首条记录的档数,据此 `open_output`(选段类型、定 csv 表头)。即「先载入、后开输出」——顺序不能反。
 
@@ -74,6 +77,6 @@ input/<fmt>  →  core(归并 + 节奏)  →  output/<dest>
 3. **广播环不背压**:trade 段是广播环,生产者从不阻塞;`realtime=0` 全速灌时成交远超环容量会**绕圈覆盖**(消费者只拿到最近一圈)。要让消费者无损跟上,用 `realtime=1.0` 真盘节奏。
 4. **错误分层 + 跳过分类(`core/error.hpp` + `core/skip.hpp`)**:可恢复的**逐行**错误由调用方 **按原因计数跳过、不断流**(`SkipStats` 分 `Malformed/BadTimestamp/BadField/UnknownSymbol/BadNumber/ScaleOverflow`,结束打分类汇总 + 未知符号去重 WARN);不可恢复的**启动期**错误(配置/建段)经 `Result<Error>` 上抛 main 转非零退出。`make_*_record` 返回 `expected<Record, SkipReason>` 把「为什么跳」从构建层带到归账层。新增逻辑沿用这条分界,别让坏行中断回放、也别让坏配置带病启动、别把跳过又折叠回单一计数。
 5. **shm attach 自校验**:`create=false` 连既有段时比对 magic/version/entry_size/capacity/schema_hash(`SchemaDrift` 容忍,其余拒启动)。`create=true` 走 `O_TRUNC` 清零重建(幂等)。
-6. **gconf 是 vendored 契约,别外伸**:符号表 / 段布局全来自 `gconf/include/`(已拷进本项目保独立)。symbol→gid 用 `gconf::sym::kNames`,非 subset 符号计数跳过。需要新段类型时优先看 `gconf/include/gconf/shm/v2/`,别去引用父仓库 `cpp/` 的任何东西。5 档的 `DepthBoard`/`DepthSlot`(`depth_board.h`)就是这样新增的段:同 `SegKind::Board`,靠 `entry_size`(128B)+ 独立 `kDepthBoardSchemaHash` 与 BBO `Board` 区分。
-7. **book 档数只 1 或 5、自动识别、不截断**:由输入(csv 表头 / json 每行键)判定,`level0` 列名不带后缀(= 旧 BBO,零迁移),`_1.._4` 为高档;残缺或 >5 → 拒绝,绝不悄悄用部分档。5 档全档共用单一 `price_scale`/`qty_scale`(对齐 `DepthSlot`)。改档相关逻辑务必同步 input 判定 / Record 数组 / 三个 output sink / `DepthBoard` 五处。
+6. **gconf 是 vendored 契约(v1.2.2),别外伸**:段布局 / 符号表全来自 `gconf/include/`(v1.2.2 子集 + 临时保留的旧 `trade.h`/`event.h`)。符号:`gid_of`(GID,trade 段用)/ `lid_of`(LID,book 段 slot 索引)都查 `gconf::sym::kGidNames`(v1.2.2 共享层,LID==GID 恒等);非 subset 符号计数跳过。**book 段 = `BookTickBoard`(单档 BBO,`kBoardSchemaHash`),按 `slot[lid]` 写、`claim_if_newer` 去重**。需要新段(如 market trade、深档)时看 `gconf/include/gconf/shm/v2/`,别引父仓库 `cpp/`;但 v1.2.2 现无这些段 → trade 暂用旧 TradeRing、深档待上游。
+7. **book 输出恒单档 BBO + 必填 `update_id`**:v1.2.2 行情段只有单档 `BookTickBoard`,故输入虽仍识别 1/5 档(`book_depth_of`),**输出只取 L0(截断)**。book 输入 csv/json **必须带 `update_id` 列/字段**(交易所盘口更新序号真值,写进段 + claim_if_newer 去重;**不可用 ts 合成**,语义不同)——当前 datas/formatted 数据无此列,需上游补;集成测试用 `booktick_e2e.sh` 的拟真数据(自带 update_id)。
 8. **流式逐行读,峰值内存与文件大小/总行数无关**:`StreamingCsvSource`/`StreamingJsonSource` 各持一个常开 `ifstream`、`advance()` 才解析下一行、只缓冲 1 条 → 实测 266MB 输入仅 ~0MB 已提交堆。**多天数据全放一目录、单次连续回放不 OOM**(一个连续时钟、跨天 realtime 节奏无缝);随**文件数**线性涨的只有文件句柄(受 `ulimit -n`,>1000 文件时 `ulimit -n 4096`)。**别**把"整文件入 vector / 攒进容器再回放"加回来——那会让内存回到 O(总行数),正是流式改造要消灭的。CSV 用手写解析而非 csv-parser 也是为此(后者每 reader ~5MB 堆 × N)。**`mem_check.sh` 守这条铁律**:跑 1× vs 3× 数据采 `RssAnon`,涨了就红;改加载/缓冲后必跑。

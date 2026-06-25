@@ -20,9 +20,8 @@
 namespace mdreplay {
 
 struct OutputCfg {
-  std::string format;        // "shm" | "csv" | "json" —— 去向
-  std::string path;          // 去向定位:shm=段名(/开头);csv|json=输出文件路径
-  bool        create{true};  // 仅 format=shm:建段 or attach
+  std::string path;          // shm 段名(/开头)
+  bool        create{true};  // 建段(O_TRUNC 幂等)or attach
 };
 
 // 时序锚:把数据时刻钉到墙钟,多进程填同值即同钟。存在=启用,缺省=各锚首事件(默认)。
@@ -113,7 +112,6 @@ struct Config {
 
   if (const auto* t = tbl["output"].as_table()) {
     cfg.output = OutputCfg{
-        (*t)["format"].value_or<std::string>(""),
         (*t)["path"].value_or<std::string>(""),
         (*t)["create"].value_or(true),
     };
@@ -124,10 +122,7 @@ struct Config {
   if (cfg.start_ns > cfg.end_ns) return std::unexpected(Error::ConfigInvalid);
   if (cfg.input_kind != "book" && cfg.input_kind != "trade")
     return std::unexpected(Error::ConfigInvalid);
-  const auto& o = cfg.output;
-  if (o.format != "shm" && o.format != "csv" && o.format != "json")
-    return std::unexpected(Error::ConfigInvalid);  // 未知 output.format
-  if (o.path.empty()) return std::unexpected(Error::ConfigInvalid);  // 去向定位必填
+  if (cfg.output.path.empty()) return std::unexpected(Error::ConfigInvalid);  // 段名必填
 
   return cfg;
 }
