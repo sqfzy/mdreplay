@@ -4,3 +4,13 @@
 
 # 回放测试数据(由 mdreplay 之外的导出器生成,体积大,不入库)
 /datas/
+
+# 开发涂鸦/草稿(非交付物)
+/.artifact/
+
+# 单测临时目录(test_main.cpp 跑时创建,正常会自删;崩溃时可能残留)
+/test_tmp*/
+
+# LSP / 编辑器生成物
+/compile_commands.json
+/.cache/
