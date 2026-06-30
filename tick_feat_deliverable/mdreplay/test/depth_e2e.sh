@@ -6,7 +6,7 @@
 # 「mdreplay 二进制写出的多档段真能被独立消费者按 mdreplay::DepthBoardSlot 布局读懂」。退出码 0=通过。
 set -uo pipefail
 
-readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # 脚本在 test/,工程根在上一级
 readonly BIN="$DIR/build/linux/x86_64/release/mdreplay"
 readonly SEG="/shm_depth_e2e"
 readonly TMP="$(mktemp -d)"
@@ -26,7 +26,15 @@ CSV
 
 # ── 跑 mdreplay：depth=5 → DepthBoard 多档段 ──────────────────────────────────────────────
 echo "[1/3] mdreplay book(5 档) → $SEG"
-"$BIN" --kind book --dir "$TMP/data" --format csv --output.path "$SEG" --output.create true --realtime 0 \
+cat > "$TMP/config.toml" <<EOF
+realtime = 0
+[[replays]]
+input  = { format = "csv", dir = "$TMP/data", kind = "book" }
+output = { path = "$SEG", create = true }
+[log]
+level = "info"
+EOF
+"$BIN" --config "$TMP/config.toml" \
   2>&1 | grep -E 'DepthBoard|done' || die "mdreplay 回放失败(或未走 DepthBoard)"
 
 # ── 编译独立消费者，按 mdreplay::DepthBoard 布局读回 ──────────────────────────────────────

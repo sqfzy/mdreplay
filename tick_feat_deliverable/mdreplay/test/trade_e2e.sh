@@ -31,7 +31,15 @@ CSV
 
 # ── 跑 mdreplay：trade → TradeRing 广播环 ─────────────────────────────────────────────────
 echo "[1/3] mdreplay trade → $SEG"
-"$BIN" --kind trade --dir "$TMP/data" --format csv --output.path "$SEG" --output.create true --realtime 0 \
+cat > "$TMP/config.toml" <<EOF
+realtime = 0
+[[replays]]
+input  = { format = "csv", dir = "$TMP/data", kind = "trade" }
+output = { path = "$SEG", create = true }
+[log]
+level = "info"
+EOF
+"$BIN" --config "$TMP/config.toml" \
   2>&1 | grep -E 'done' || die "mdreplay 回放失败"
 
 # ── 编译独立消费者，按 gconf v2 TradeRing 契约 drain 读回 ─────────────────────────────────

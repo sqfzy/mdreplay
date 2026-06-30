@@ -1,8 +1,10 @@
 #pragma once
 // config.hpp — 解析 config.toml → Config + 校验。toml++ 驱动;datetime 窗口转 epoch ns。
 //
-// 校验在启动期一次做完(realtime∈[0,1]、input.kind∈{book,trade}、output.format∈{shm,csv,json}
-// 且对应 shm/path 非空),任一不符 → ConfigInvalid 上抛 main 转非零退出(不带病进回放)。
+// 多路同步回放:顶层 realtime/init_ts 全局(一条时钟),[[replays]] 数组每元素是一个自包含
+// (input + output + 本路时间窗) 单元——input/output 绑成一对,无 index 配对、无等长校验。
+// 校验在启动期一次做完(realtime∈[0,1]、各 input.kind∈{book,trade}、各 input.format∈{csv,json,auto}、
+// 各 output.path 非空且两两不同、各 start≤end),任一不符 → ConfigInvalid 上抛 main 转非零退出。
 
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +13,8 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 #include <toml++/toml.hpp>
 
@@ -19,28 +23,32 @@
 
 namespace mdreplay {
 
+// 一路输入:格式 + 目录 + 记录类型。
+struct InputCfg {
+  std::string format{"csv"};  // csv | json | auto
+  std::string dir;
+  std::string kind{"book"};   // book | trade
+};
+
 struct OutputCfg {
   std::string path;          // shm 段名(/开头)
   bool        create{true};  // 建段(O_TRUNC 幂等)or attach
 };
 
-// 时序锚:把数据时刻钉到墙钟,多进程填同值即同钟。存在=启用,缺省=各锚首事件(默认)。
-struct AnchorCfg {
-  std::int64_t data_ts_ns;    // 数据时刻原点(epoch ns)
-  std::int64_t system_ts_ns;  // 该时刻对应的墙钟(epoch ns,UTC)
+// 一路回放单元:input → output,带本路独立时间窗(per-replay)。多路共享顶层 realtime/init_ts 一条时钟。
+struct ReplayCfg {
+  InputCfg     input;
+  OutputCfg    output;
+  std::int64_t start_ns{kNoStart};  // 本路时间窗起(epoch ns;留空=最早)
+  std::int64_t end_ns{kNoEnd};      // 本路时间窗止(留空=最晚)
 };
 
 struct Config {
-  std::string  input_format{"csv"};  // csv | json —— 输入文件格式
-  std::string  dir;
-  std::string  input_kind{"book"};   // book | trade —— 记录类型(单入单出,一次一种)
-  double       realtime{1.0};
-  std::int64_t start_ns{kNoStart};
-  std::int64_t end_ns{kNoEnd};
-  std::optional<AnchorCfg> anchor;   // 留空=不同步;两端齐备=启用 system_clock 同钟
-  OutputCfg    output;
-  std::string  log_level{"info"};
-  int          progress_sec{5};
+  double                      realtime{1.0};  // 全局:0~1 播放速率
+  std::optional<std::int64_t> init_ts;        // 全局:手动数据原点(epoch ns);缺省=自动锚首个被回放事件
+  std::vector<ReplayCfg>      replays;         // [[replays]] —— 至少 1 路
+  std::string                 log_level{"info"};
+  int                         progress_sec{5};
 };
 
 // "YYYY-MM-DD HH:MM:SS"(UTC)→ epoch ns;空串 → sentinel(无界)。解析失败 → nullopt。
@@ -72,8 +80,8 @@ struct Config {
   return static_cast<std::int64_t>(secs) * 1'000'000'000LL;
 }
 
-// anchor 字段取值:裸整数 = epoch ns;否则按 UTC datetime("YYYY-MM-DD HH:MM:SS")。空/非法 → nullopt。
-[[nodiscard]] inline std::optional<std::int64_t> parse_anchor_value(const std::string& s) {
+// 时刻取值:裸整数 = epoch ns;否则按 UTC datetime("YYYY-MM-DD HH:MM:SS")。空/非法 → nullopt。
+[[nodiscard]] inline std::optional<std::int64_t> parse_ts_value(const std::string& s) {
   if (s.empty()) return std::nullopt;
   char*           end = nullptr;
   const long long v   = std::strtoll(s.c_str(), &end, 10);
@@ -81,48 +89,76 @@ struct Config {
   return parse_datetime_ns(s, 0);                                        // 否则 datetime(非空,失败→nullopt)
 }
 
+// 顶层 `init_ts`(手动数据原点):整数当裸 ns,字符串走 parse_ts_value,空串=不设(自动)。
+// 返回 nullopt 表「没配/留空」,error 表「配了但非法」。
+[[nodiscard]] inline std::optional<Result<std::int64_t>> parse_init_ts(const toml::table& tbl) {
+  const auto n = tbl["init_ts"];
+  if (const auto i = n.value<std::int64_t>()) return Result<std::int64_t>{*i};        // 裸 ns
+  if (const auto s = n.value<std::string>()) {
+    if (s->empty()) return std::nullopt;                                              // 留空=自动
+    if (const auto v = parse_ts_value(*s)) return Result<std::int64_t>{*v};
+    return Result<std::int64_t>{std::unexpected(Error::ConfigInvalid)};               // 非法
+  }
+  return std::nullopt;                                                                // 没配=自动
+}
+
+// 解析一个 [[replays]] 元素(input/output 子 inline 表 + 本路 start/end)。结构缺失/窗口非法 → ConfigInvalid。
+[[nodiscard]] inline Result<ReplayCfg> parse_replay(const toml::table& e) {
+  const auto* in_t  = e["input"].as_table();
+  const auto* out_t = e["output"].as_table();
+  if (!in_t || !out_t) return std::unexpected(Error::ConfigInvalid);  // 每路必须有 input + output
+
+  ReplayCfg r;
+  r.input  = InputCfg{(*in_t)["format"].value_or<std::string>("csv"),
+                      (*in_t)["dir"].value_or<std::string>(""),
+                      (*in_t)["kind"].value_or<std::string>("book")};
+  r.output = OutputCfg{(*out_t)["path"].value_or<std::string>(""),
+                       (*out_t)["create"].value_or(true)};
+
+  const auto start = parse_datetime_ns(e["start"].value_or<std::string>(""), kNoStart);
+  const auto end   = parse_datetime_ns(e["end"].value_or<std::string>(""), kNoEnd);
+  if (!start || !end) return std::unexpected(Error::ConfigInvalid);
+  r.start_ns = *start;
+  r.end_ns   = *end;
+  return r;
+}
+
 // 从已解析的 table 提取 + 校验 → Config(纯,可单测)。
 [[nodiscard]] inline Result<Config> parse_config(const toml::table& tbl) {
   Config cfg;
-  cfg.input_format = tbl["input"]["format"].value_or<std::string>("csv");
-  cfg.dir          = tbl["input"]["dir"].value_or<std::string>("");
-  cfg.input_kind   = tbl["input"]["kind"].value_or<std::string>("book");
-  cfg.realtime     = tbl["replay"]["realtime"].value_or(1.0);
+  cfg.realtime     = tbl["realtime"].value_or(1.0);
   cfg.log_level    = tbl["log"]["level"].value_or<std::string>("info");
   cfg.progress_sec = tbl["log"]["progress_sec"].value_or(5);
 
-  const auto start = parse_datetime_ns(tbl["replay"]["start"].value_or<std::string>(""), kNoStart);
-  const auto end   = parse_datetime_ns(tbl["replay"]["end"].value_or<std::string>(""), kNoEnd);
-  if (!start || !end) return std::unexpected(Error::ConfigInvalid);
-  cfg.start_ns = *start;
-  cfg.end_ns   = *end;
-
-  // [replay].anchor 内联表:data_ts + system_ts 两端都齐才算启用;只给一半 → 映射不完整,拒。
-  if (const auto* a = tbl["replay"]["anchor"].as_table()) {
-    const auto field = [&](const char* key) -> std::optional<std::int64_t> {
-      const auto n = (*a)[key];
-      if (const auto i = n.template value<std::int64_t>()) return *i;           // 裸 ns
-      if (const auto s = n.template value<std::string>()) return parse_anchor_value(*s);
-      return std::nullopt;
-    };
-    const auto d = field("data_ts"), s = field("system_ts");
-    if (!d || !s) return std::unexpected(Error::ConfigInvalid);
-    cfg.anchor = AnchorCfg{*d, *s};
+  if (auto it = parse_init_ts(tbl)) {  // 配了 init_ts(合法/非法)
+    if (!*it) return std::unexpected((*it).error());
+    cfg.init_ts = **it;
   }
 
-  if (const auto* t = tbl["output"].as_table()) {
-    cfg.output = OutputCfg{
-        (*t)["path"].value_or<std::string>(""),
-        (*t)["create"].value_or(true),
-    };
+  // [[replays]]:数组每元素一路。缺失整个数组 / 空数组 → 后面校验拒。
+  if (const auto* arr = tbl["replays"].as_array()) {
+    for (const auto& node : *arr) {
+      const auto* e = node.as_table();
+      if (!e) return std::unexpected(Error::ConfigInvalid);  // 元素必须是表
+      auto r = parse_replay(*e);
+      if (!r) return std::unexpected(r.error());
+      cfg.replays.push_back(std::move(*r));
+    }
   }
 
   // 校验
   if (cfg.realtime < 0.0 || cfg.realtime > 1.0) return std::unexpected(Error::ConfigInvalid);
-  if (cfg.start_ns > cfg.end_ns) return std::unexpected(Error::ConfigInvalid);
-  if (cfg.input_kind != "book" && cfg.input_kind != "trade")
-    return std::unexpected(Error::ConfigInvalid);
-  if (cfg.output.path.empty()) return std::unexpected(Error::ConfigInvalid);  // 段名必填
+  if (cfg.replays.empty()) return std::unexpected(Error::ConfigInvalid);  // 至少 1 路
+  std::unordered_set<std::string> seen_paths;
+  for (const auto& r : cfg.replays) {
+    if (r.input.kind != "book" && r.input.kind != "trade") return std::unexpected(Error::ConfigInvalid);
+    if (r.input.format != "csv" && r.input.format != "json" && r.input.format != "auto")
+      return std::unexpected(Error::ConfigInvalid);
+    if (r.output.path.empty()) return std::unexpected(Error::ConfigInvalid);   // 段名必填
+    if (!seen_paths.insert(r.output.path).second)                              // 段名两两不同
+      return std::unexpected(Error::ConfigInvalid);                           //   防多路互覆盖同段
+    if (r.start_ns > r.end_ns) return std::unexpected(Error::ConfigInvalid);
+  }
 
   return cfg;
 }

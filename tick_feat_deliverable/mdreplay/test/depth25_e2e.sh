@@ -51,7 +51,15 @@ ncols=$(head -1 "$TMP/data/okx_SOLUSDT.book.csv" | awk -F',' '{print NF}')
 
 # ── 跑 mdreplay：depth=25 → DepthBoard 多档段 ─────────────────────────────────────────────
 echo "[1/3] mdreplay book(25 档) → $SEG"
-"$BIN" --kind book --dir "$TMP/data" --format csv --output.path "$SEG" --output.create true --realtime 0 \
+cat > "$TMP/config.toml" <<EOF
+realtime = 0
+[[replays]]
+input  = { format = "csv", dir = "$TMP/data", kind = "book" }
+output = { path = "$SEG", create = true }
+[log]
+level = "info"
+EOF
+"$BIN" --config "$TMP/config.toml" \
   2>&1 | grep -E 'DepthBoard|done' || die "mdreplay 回放失败(或未走 DepthBoard)"
 
 # ── 编译独立消费者，按 mdreplay::DepthBoard 布局逐档读回 ─────────────────────────────────
