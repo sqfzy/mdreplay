@@ -63,7 +63,7 @@ realtime = 1.0      # 全局 0~1:1=原速(默认);0.5=2× 实时;0=尽快(纯逻
 
 [[replays]]                                                       # 第 1 路
 input  = { format = "csv", dir = "datas", kind = "book" }         # format: csv|json|auto;kind: book|trade
-output = { path = "/shm_bybit_lin_book_tick", create = true }     # path: shm 段名(/开头);create: 建段/attach
+output = { path = "/shm_bybit_lin_book_tick_v2", create = true }  # 段名(/开头)+ 建段/attach。v2 BookTickBoard 走 _v2(gconf v1.2.2 约定)
 start  = "" ; end = ""                                            # 本路时间窗(UTC,留空=无界,可跨天)
 
 # [[replays]]                                                     # 第 2 路(再加一路 = 再写一个块;段名须两两不同)

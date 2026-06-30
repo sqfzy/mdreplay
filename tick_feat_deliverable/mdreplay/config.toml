@@ -11,7 +11,7 @@ realtime = 1.0             # 全局节奏 0~1:值=有多实时。1=原速(默认
 # book 档数({1,5,10,15,20,25})由输入表头/键自动识别(depth==1→BookTickBoard、>1→DepthBoard)。
 [[replays]]
 input  = { format = "csv", dir = "datas", kind = "book" }      # format: csv|json|auto;kind: book|trade
-output = { path = "/shm_bybit_lin_book_tick", create = true }  # path: shm 段名(/开头);create: 建段/attach
+output = { path = "/shm_bybit_lin_book_tick_v2", create = true }  # 段名(/开头)+ 建段/attach。v2 BookTickBoard 走 _v2 后缀(gconf v1.2.2 约定:无后缀=旧 v1 段)
 start  = ""                # 本路时间窗起(留空=最早),例 "2026-06-23 09:00:00"(UTC),可跨天
 end    = ""                # 本路时间窗止(留空=最晚),闭区间
 
