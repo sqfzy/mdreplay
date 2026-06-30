@@ -80,48 +80,62 @@ void print_usage() {
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<Config> load_with_overrides(int argc, char** argv) {
+// CLI 只覆盖顶层全局项(per-replay 字段一律 config 文件)。
+struct CliOverrides {
   std::string                config_path = "config.toml";
-  std::optional<std::string> ov_log, ov_init_ts;
-  std::optional<double>      ov_realtime;
-  std::optional<int>         ov_progress;
+  std::optional<std::string> log, init_ts;
+  std::optional<double>      realtime;
+  std::optional<int>         progress;
+};
 
+// 扫 argv → 全局 flag 覆盖值。--help 直接退出;未知参数 / 坏数值 → nullopt(已报错)。
+[[nodiscard]] std::optional<CliOverrides> parse_cli(int argc, char** argv) {
+  CliOverrides ov;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string{}; };
     if (a == "--help") { print_usage(); std::exit(0); }
-    else if (a == "--config") config_path = next();
+    else if (a == "--config") ov.config_path = next();
     else if (a == "--realtime") {
-      if (!(ov_realtime = parse_double(next()))) { spdlog::error("--realtime 需数字"); return std::nullopt; }
+      if (!(ov.realtime = parse_double(next()))) { spdlog::error("--realtime 需数字"); return std::nullopt; }
     }
-    else if (a == "--init_ts") ov_init_ts = next();
-    else if (a == "--log-level") ov_log = next();
+    else if (a == "--init_ts") ov.init_ts = next();
+    else if (a == "--log-level") ov.log = next();
     else if (a == "--progress-sec") {
-      if (!(ov_progress = parse_int(next()))) { spdlog::error("--progress-sec 需整数"); return std::nullopt; }
+      if (!(ov.progress = parse_int(next()))) { spdlog::error("--progress-sec 需整数"); return std::nullopt; }
     }
     else { spdlog::error("unknown arg: {} (--help 查看用法;per-replay 字段请在 config 配置)", a); return std::nullopt; }
   }
+  return ov;
+}
 
-  auto cfg = mdreplay::load_config(config_path);
+// 把 CLI 覆盖叠到 config 上 + 覆盖后复校验(CLI 可能注入非法值)。失败 → false(已报错)。
+[[nodiscard]] bool apply_overrides(Config& cfg, const CliOverrides& ov) {
+  if (ov.realtime) cfg.realtime = *ov.realtime;
+  if (ov.log) cfg.log_level = *ov.log;
+  if (ov.progress) cfg.progress_sec = *ov.progress;
+  if (ov.init_ts) {  // 手动数据原点(datetime 或 epoch ns);空串=清除(回自动)
+    if (ov.init_ts->empty()) cfg.init_ts = std::nullopt;
+    else if (const auto v = mdreplay::parse_ts_value(*ov.init_ts)) cfg.init_ts = *v;
+    else { spdlog::error("--init_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)"); return false; }
+  }
+  if (cfg.realtime < 0.0 || cfg.realtime > 1.0) {  // replays 结构在 parse_config 已校验
+    spdlog::error("realtime 须 ∈ [0,1](得到 {})", cfg.realtime);
+    return false;
+  }
+  return true;
+}
+
+// 加载配置 + 叠 CLI 全局覆盖:扫参数 → load → apply → 复校验。
+[[nodiscard]] std::optional<Config> load_with_overrides(int argc, char** argv) {
+  const auto ov = parse_cli(argc, argv);
+  if (!ov) return std::nullopt;
+  auto cfg = mdreplay::load_config(ov->config_path);
   if (!cfg) {
-    spdlog::error("load config '{}' failed: {}", config_path, mdreplay::to_string(cfg.error()));
+    spdlog::error("load config '{}' failed: {}", ov->config_path, mdreplay::to_string(cfg.error()));
     return std::nullopt;
   }
-
-  if (ov_realtime) cfg->realtime = *ov_realtime;
-  if (ov_log) cfg->log_level = *ov_log;
-  if (ov_progress) cfg->progress_sec = *ov_progress;
-  if (ov_init_ts) {  // 手动数据原点覆盖(datetime 或 epoch ns);空串=清除(回自动)
-    if (ov_init_ts->empty()) cfg->init_ts = std::nullopt;
-    else if (const auto v = mdreplay::parse_ts_value(*ov_init_ts)) cfg->init_ts = *v;
-    else { spdlog::error("--init_ts 非法(需 UTC datetime \"YYYY-MM-DD HH:MM:SS\" 或 epoch ns 整数)"); return std::nullopt; }
-  }
-
-  // 覆盖后复校验(CLI 可能注入非法 realtime;replays 结构在 parse_config 已校验)
-  if (cfg->realtime < 0.0 || cfg->realtime > 1.0) {
-    spdlog::error("realtime 须 ∈ [0,1](得到 {})", cfg->realtime);
-    return std::nullopt;
-  }
+  if (!apply_overrides(*cfg, *ov)) return std::nullopt;
   return *cfg;
 }
 
@@ -230,6 +244,16 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
     spdlog::warn("sink 写入失败 {} 条(未落段);请检查输出段状态", write_fails);
 }
 
+// 打印一路装配结果(段类型 + 窗口边界,sentinel 渲染成「最早/最晚」)。
+void log_replay_opened(std::size_t unit, const mdreplay::InputCfg& in, std::size_t n_sources,
+                       Kind kind, std::size_t depth, const mdreplay::ReplayCfg& rc) {
+  const char* seg = (kind != Kind::Book) ? "TradeRing" : (depth == 1 ? "BookTickBoard(BBO)" : "DepthBoard(多档)");
+  const std::string lo = (rc.start_ns == mdreplay::kNoStart) ? "最早" : std::to_string(rc.start_ns);
+  const std::string hi = (rc.end_ns == mdreplay::kNoEnd) ? "最晚" : std::to_string(rc.end_ns);
+  spdlog::info("replay#{}: input {} {} ({} 源, {} 档) → {} [{}] ({}), window=[{}..{}]", unit, in.format,
+               in.kind, n_sources, depth, rc.output.path, seg, rc.output.create ? "created" : "attached", lo, hi);
+}
+
 // 载入一路 + 开输出 + 把其源拼进全局列表(记 unit)。返回 false = 该路无源/开输出失败(已报错)。
 [[nodiscard]] bool load_one_replay(const mdreplay::ReplayCfg& rc, std::size_t unit,
                                    mdreplay::SkipStats& skips,
@@ -263,12 +287,7 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
                   mdreplay::to_string(out.error()));
     return false;
   }
-  const char* seg_type = (kind != Kind::Book) ? "TradeRing" : (depth == 1 ? "BookTickBoard(BBO)" : "DepthBoard(多档)");
-  const std::string win_lo = (rc.start_ns == mdreplay::kNoStart) ? "最早" : std::to_string(rc.start_ns);
-  const std::string win_hi = (rc.end_ns == mdreplay::kNoEnd) ? "最晚" : std::to_string(rc.end_ns);
-  spdlog::info("replay#{}: input {} {} ({} 源, {} 档) → {} [{}] ({}), window=[{}..{}]", unit, in.format,
-               in.kind, sources.size(), depth, rc.output.path, seg_type,
-               rc.output.create ? "created" : "attached", win_lo, win_hi);
+  log_replay_opened(unit, in, sources.size(), kind, depth, rc);
 
   for (auto& s : sources) { global_sources.push_back(std::move(s)); src_unit.push_back(unit); }
   opens.push_back(std::move(*out));
