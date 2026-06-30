@@ -15,14 +15,14 @@ book 输入需带 `update_id` 列(交易所盘口更新序号)。端到端集成
 ## 设计:三段式(输入双格式 → shm 输出)
 
 ```
-input/<fmt>   →   core(归并 + 节奏)   →   output(shm)
- csv / json        merge / clock / fixed       BookTickBoard(book)/ TradeRing(trade)
-   ↓ 解析 Record         ↓ 全局有序 + realtime        ↓ 写 gconf v1.2.2 段
+input/<fmt>   →   core(归并 + 节奏 + 路由)   →   output(shm)
+ csv / json        merge / clock / fixed         BookTickBoard / DepthBoard(book)/ TradeRing(trade)
+   ↓ 解析 Record    ↓ 全局有序 + realtime + 按 unit     ↓ 写 gconf v1.2.2 段
 ```
 
 - **input/**:按格式可插拔的解析器(`csv.hpp` / `json.hpp`)→ Record。加格式 = 加一个文件。
-- **core/**:格式无关的回放核心(record / merge 归并 / clock 节奏 / fixed 定点 / config / report)。
-- **output/**:`shm.hpp` —— book→`BookTickBoard.slot[lid]`(BBO + claim_if_newer 去重)、trade→`TradeRing`(临时)。
+- **core/**:格式无关的回放核心(record / merge 归并+per-unit 窗口 / clock 节奏 / fixed 定点 / config / report)。
+- **output/**:`shm.hpp` —— book depth==1→`BookTickBoard.slot[lid]`(BBO)、depth>1→本地 `DepthBoard.slot[lid]`(全档)、trade→`TradeRing`(临时);均 `claim_if_newer` 去重。每条 Record 按其 unit 路由到对应段。
 
 **多路同步**:一个 config 配 N 个 `[[replays]]`,各路 `(input→output)` 在一个进程、一条全局时钟下同步回放、按 unit 路由各写各段(book/trade 同进程 = 两路;多 venue 各一路、各写各段不撞槽)。
 
@@ -32,20 +32,21 @@ input/<fmt>   →   core(归并 + 节奏)   →   output(shm)
 
 | kind | 字段 |
 |---|---|
-| book(1 档 / BBO) | `ts, symbol, bid_px, bid_qty, ask_px, ask_qty` |
-| book(5 档) | 上面 + `bid_px_1..4, bid_qty_1..4, ask_px_1..4, ask_qty_1..4`(level0 不带后缀) |
+| book(1 档 / BBO) | `ts, symbol, update_id, bid_px, bid_qty, ask_px, ask_qty` |
+| book(N 档) | 上面 + `bid_px_1..(N-1), bid_qty_…, ask_px_…, ask_qty_…`(level0 不带后缀,N∈{5,10,15,20,25}) |
 | trade | `ts, symbol, side, px, qty` |
 
 - **输入格式 `csv` / `json` / `auto`**:`auto` 扫目录自动识别(仅一种格式时);两种并存或都没有 → **自描述
   报错**(说明只支持 csv/json、该怎么办),不让你干瞪眼。`--format parquet` 等能力外格式同样自描述拒绝。
-- **book 档数自动识别,只接受 1 或 5**:无 `_1..` 列/键 → 1 档;`_1.._4` 齐全且无 `_5` → 5 档;
-  残缺(部分档)或 >5 档 → 拒绝(csv 拒整文件 / json 跳该行),**绝不截断**;报错会**数出实际档数**
-  (如"档数 100 不受支持")并告知支持范围。输出档数跟随输入。
+- **book 档数自动识别,只接受 `{1,5,10,15,20,25}`**:无 `_1..` 列/键 → 1 档;`_1..(N-1)` 连续齐全
+  且无更高档 → N 档(如 `_1.._4`→5、`_1.._24`→25);残缺/中缺/跳档/越界 → 拒绝(csv 拒整文件 / json
+  跳该行),**绝不截断**;报错会**数出实际档数**并告知支持范围。**一路 [[replays]] 内各源档数必须一致**
+  (混档拒启动)。输出档数跟随输入(1 档 → BookTickBoard;>1 → 本地 DepthBoard)。
 - `ts` = epoch **纳秒**(= gconf `exch_ns`)。
 - `symbol` = 字符串,经 gconf `symbols.h` 映射 `global_symbol_id`;非 subset 符号计数跳过。
 - `side`(trade)= `0` buy / `1` sell。
 - `px` / `qty` / `bid_px…` = **十进制原值**(json 里为**字符串**,如 `"68.84"`)。精度**沿用数据本身**:
-  小数位即定点 `scale`,逐记录写进段的 `price_scale`/`qty_scale`(5 档全档共用单一 scale),mdreplay 不规定精度。
+  小数位即定点 `scale`,逐记录写进段的 `price_scale`/`qty_scale`(多档时全档共用单一 scale),mdreplay 不规定精度。
 
 坏行 / 缺列 / 未知符号 / 数值非法 / scale 溢出 → **按原因分类计数**跳过,不中断;结束打分类汇总,
 未知符号额外 WARN 去重列表(指引补 `symbols.h`)。
