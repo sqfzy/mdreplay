@@ -205,6 +205,18 @@ static void test_merge() {
     CHECK((got == std::vector<std::pair<std::int64_t, std::size_t>>{
                       {120, 1}, {200, 0}, {220, 1}, {320, 1}}));
   }
+  // 跨 unit 同 ts → tiebreak 严格按 unit-major 源下标(可复现命根:同 ts 谁先出必须确定)
+  {
+    std::vector<std::unique_ptr<Source>> s;
+    s.push_back(make_src({200, 200}, 11));  // src0 → unit0(全在同一 ts 200)
+    s.push_back(make_src({200, 200}, 22));  // src1 → unit1
+    Merger m(std::move(s), std::vector<std::size_t>{0, 1},
+             std::vector<std::pair<std::int64_t, std::int64_t>>{{kNoStart, kNoEnd}, {kNoStart, kNoEnd}});
+    std::vector<std::size_t> units;
+    while (auto r = m.next()) units.push_back(r->unit);
+    // 同 ts:源下标小(unit0)先于源下标大(unit1),逐条交替不乱 → 确定序
+    CHECK((units == std::vector<std::size_t>{0, 0, 1, 1}));
+  }
 }
 
 static void test_config() {
@@ -246,6 +258,9 @@ static void test_config() {
   CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"a\",kind=\"book\"}\noutput={path=\"/x\"}\n[[replays]]\ninput={dir=\"b\",kind=\"book\"}\noutput={path=\"/x\"}")).has_value());  // path 重复
   CHECK(!parse_config(toml::parse("[[replays]]\noutput={path=\"/s\"}")).has_value());                                  // 缺 input
   CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\nstart=\"2026-06-23 02:00:00\"\nend=\"2026-06-23 01:00:00\"")).has_value());  // start>end
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",format=\"parquet\",kind=\"book\"}\noutput={path=\"/s\"}")).has_value());  // 坏 format
+  CHECK(parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",format=\"auto\",kind=\"book\"}\noutput={path=\"/s\"}")).has_value());      // auto 受支持
+  CHECK(parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\nstart=\"2026-06-23 01:00:00\"\nend=\"2026-06-23 01:00:00\"")).has_value());  // start==end 单点窗放行
   // per-replay datetime 窗口 → 整秒 ns
   {
     const auto c = parse_config(toml::parse(R"(
@@ -323,7 +338,7 @@ static void test_e2e() {
   }
 }
 
-// CSV 解析委托 csv-parser 后的新能力:带引号/转义字段正确解析(旧手写 split 会把引号留在值里 →
+// 手写 CSV 解析(input/csv.hpp)的引号能力:带引号/转义字段正确解析(朴素 split 会把引号留在值里 →
 // fixed.hpp 拒为非数字 → 整行静默跳)。同时验证列数不符的 ragged 行仍计数跳过。
 static void test_csv_quoting() {
   using namespace mdreplay;

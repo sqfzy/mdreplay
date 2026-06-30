@@ -28,6 +28,8 @@ bash test/depth_e2e.sh                        # 端到端(多档):拟真 5 档 b
 bash test/depth25_e2e.sh                      # 端到端(满档 25):拟真 25 档 book → DepthBoard shm → 另进程逐档(L0/L12/L24)读回核对
 bash test/trade_e2e.sh                        # 端到端(成交):拟真 trade → TradeRing shm → 另进程 drain 逐条读回核对(价量+scale+GID+side+顺序)
 bash test/multi_e2e.sh                        # 端到端(多路):一个 config 两路(book+trade)单进程同钟 → 另进程同时读回两段核对路由
+bash test/multi_venue_e2e.sh                  # 端到端(同 kind 多 venue):两路 book 各写各段 + per-replay 窗口 → 验无串段、窗口裁末行
+bash test/repro_e2e.sh                        # 端到端(可复现守门):同输入跑两遍 → shm 段逐字节一致(铁律 1 自动化)
 ```
 
 - **两层测试**:`xmake run test`(`test_main.cpp`,纯逻辑单元 + e2e,进程内);`test/mem_check.sh`(操作级,跑二进制读 `/proc` 采峰值 `RssAnon`,守住「~0MB 已提交堆与数据量无关」这一核心卖点——纯逻辑单测够不到进程级内存)。改输入加载/缓冲策略后务必跑后者。
@@ -35,7 +37,7 @@ bash test/multi_e2e.sh                        # 端到端(多路):一个 config 
 - 产物路径:`build/linux/x86_64/release/mdreplay`。
 - 依赖:`spdlog` 走系统 pkg-config(`{system = true}`);`toml++` / `nlohmann_json` 由 xmake 包管理拉取。**无静态库 target、无 vendored 解析器**。
 - **CSV 解析手写(`input/csv.hpp`)**:`getline` + 引号感知切分(RFC4180-lite:`"..."` 包裹/`""` 转义/CRLF,不支持字段内换行)。**为何不用 csv-parser**:其 reader 每实例占 ~5MB 已提交堆,N 路归并同开 N 个 → 内存随**文件数**涨;手写 `ifstream` 逐行读峰值 O(1 行),实测 266MB 输入仅 ~0MB 已提交堆(见铁律 8)。无引号行走零拷贝快路(string_view 直指行缓冲),含引号行去引号到 owned 缓冲。CSV 数值走 `fixed.hpp` 定点,**不碰 double**(保 bit-exact)。曾用 csv-parser 5.3.0,因上述内存问题于流式改造时移除(实测手写解析对 csv-parser 全路径逐字节一致)。
-- **单测无 per-test 过滤**:`test/test_main.cpp` 是单一二进制,`main()` 顺序调 `test_fixed` / `test_clock` / `test_signal` / `test_merge`(含多 unit 路由 + per-unit 窗口)/ `test_config`([[replays]] 数组解析)/ `test_e2e` / `test_file_io` / `test_csv_quoting` / `test_skip_reasons` / `test_book_depth_of`(档数判定 {1,5,10,15,20,25})/ `test_book_depth5` / `test_depth_board`(DepthBoard 多档写读 + 去重 + 满档 25)/ `test_init_ts`(手动数据原点)等。要只跑一个,临时在 `main()` 注释掉其余调用(别引入测试框架,保持同 cpp 工程 `test_core` 的极简风格)。
+- **单测无 per-test 过滤**:`test/test_main.cpp` 是单一二进制,`main()` 顺序调 `test_fixed` / `test_clock` / `test_signal` / `test_merge`(含多 unit 路由 + per-unit 窗口 + 跨 unit 同 ts tiebreak)/ `test_config`([[replays]] 数组解析 + path 重复/缺项/窗口/format 边界)/ `test_e2e` / `test_file_io` / `test_csv_quoting` / `test_skip_reasons` / `test_book_depth_of`(档数判定 {1,5,10,15,20,25})/ `test_book_depth5` / `test_depth_board`(DepthBoard 多档写读 + 去重 + 满档 25)/ `test_init_ts`(手动数据原点)等。要只跑一个,临时在 `main()` 注释掉其余调用(别引入测试框架,保持同 cpp 工程 `test_core` 的极简风格)。
 
 ```bash
 # 回放:一个 config 的 N 个 [[replays]] 在一个进程、一条时钟里同步回放,各写各段。book 输入需带 update_id 列
