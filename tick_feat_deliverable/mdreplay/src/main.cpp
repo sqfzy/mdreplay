@@ -206,19 +206,17 @@ load_sources(const mdreplay::InputCfg& in, Kind kind, mdreplay::SkipStats& skips
   return sources;
 }
 
-// init_ts + realtime>0:把首事件的播出墙钟延迟显式打出来 —— init_ts 远离数据范围(如手滑写 0)会让
-// 首事件睡数十年像卡死,这条 INFO 让它一眼可见(peek 幂等,不消费,Merger 仍能拿到同一首条)。
-void log_first_event_delay(const Config& cfg,
-                           const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
+// init_ts + realtime>0:首个**被回放**事件(已过 per-replay 窗口过滤,故是真正播出的第一条)的播出延迟。
+// 负值 = init_ts 落在数据之后 → 早于 init_ts 的事件偏移钳 0、立即 burst(WARN);正常为正(INFO)。
+// init_ts 远离数据(如手滑写 0 → 数十年)时,这条让异常一眼可见。
+void log_init_delay(const Config& cfg, std::int64_t first_ts) {
   if (!cfg.init_ts || cfg.realtime <= 0.0) return;
-  std::optional<std::int64_t> min_ts;
-  for (const auto& s : sources)
-    if (const mdreplay::Record* r = s->peek())
-      min_ts = (min_ts && *min_ts <= r->ts_ns) ? min_ts : std::optional(r->ts_ns);
-  if (!min_ts) return;
-  const double delay_s = static_cast<double>(*min_ts - *cfg.init_ts) * cfg.realtime / 1e9;
-  spdlog::info("init_ts={}ns → 首事件(ts={}ns)约 {:.1f}s 后播出;若异常大/为负,多半 init_ts 偏离数据范围",
-               *cfg.init_ts, *min_ts, delay_s);
+  const double delay_s = static_cast<double>(first_ts - *cfg.init_ts) * cfg.realtime / 1e9;
+  if (delay_s < 0.0)
+    spdlog::warn("init_ts={}ns 落在首个被回放事件(ts={}ns)之后 → 早于 init_ts 的事件将立即 burst"
+                 "(delay={:.1f}s);多半 init_ts 配错", *cfg.init_ts, first_ts, delay_s);
+  else
+    spdlog::info("init_ts={}ns → 首个被回放事件(ts={}ns)约 {:.1f}s 后播出", *cfg.init_ts, first_ts, delay_s);
 }
 
 // 全局归并 + 按 unit 路由回放。
@@ -230,10 +228,12 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
   mdreplay::Clock    clock(cfg.realtime, cfg.init_ts);  // init_ts 缺省=自动锚首个被回放事件
   mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
   std::uint64_t      write_fails = 0;                    // sink 写失败计数(不丢信号,收尾 WARN)
+  bool               first = true;
   while (!mdreplay::stop_requested()) {
     const auto tagged = merger.next();
     if (!tagged) break;
     const mdreplay::Record& rec = tagged->rec;
+    if (first) { first = false; log_init_delay(cfg, rec.ts_ns); }  // 真正首条(已过窗口)→ 延迟准确
     clock.pace_to(rec.ts_ns, mdreplay::g_stop_requested);
     if (mdreplay::stop_requested()) break;  // pacing 被信号打断 → 不发这条半路事件,停在干净边界
     if (!opens[tagged->unit].sink->write(rec)) ++write_fails;  // 按 unit 路由;写失败计数、不静默吞
@@ -325,7 +325,6 @@ int main(int argc, char** argv) {
   }
   spdlog::info("loaded {} replays, {} sources total, realtime={}", cfg->replays.size(),
                global_sources.size(), cfg->realtime);
-  log_first_event_delay(*cfg, global_sources);  // init_ts 偏离数据 → 首事件超长延迟一眼可见
 
   replay(*cfg, std::move(global_sources), std::move(src_unit), std::move(unit_window), opens, skips);
   for (auto& o : opens) o.sink->on_finish();  // 各路去向相关收尾(trade 环绕圈告警等)
