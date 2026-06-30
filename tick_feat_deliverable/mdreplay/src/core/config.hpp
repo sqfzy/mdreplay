@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <spdlog/spdlog.h>
 #include <toml++/toml.hpp>
 
 #include "core/error.hpp"
@@ -146,18 +147,38 @@ struct Config {
     }
   }
 
-  // 校验
-  if (cfg.realtime < 0.0 || cfg.realtime > 1.0) return std::unexpected(Error::ConfigInvalid);
-  if (cfg.replays.empty()) return std::unexpected(Error::ConfigInvalid);  // 至少 1 路
+  // 校验(失败即指明是哪项/哪路 —— 段名重复 vs start>end 不能都收敛成同一句无信息的 "config invalid")
+  if (cfg.realtime < 0.0 || cfg.realtime > 1.0) {
+    spdlog::error("config: realtime={} 不在 [0,1]", cfg.realtime);
+    return std::unexpected(Error::ConfigInvalid);
+  }
+  if (cfg.replays.empty()) {  // 至少 1 路
+    spdlog::error("config: 至少需要一个 [[replays]]");
+    return std::unexpected(Error::ConfigInvalid);
+  }
   std::unordered_set<std::string> seen_paths;
-  for (const auto& r : cfg.replays) {
-    if (r.input.kind != "book" && r.input.kind != "trade") return std::unexpected(Error::ConfigInvalid);
-    if (r.input.format != "csv" && r.input.format != "json" && r.input.format != "auto")
+  for (std::size_t i = 0; i < cfg.replays.size(); ++i) {
+    const auto& r = cfg.replays[i];
+    if (r.input.kind != "book" && r.input.kind != "trade") {
+      spdlog::error("config: replay#{} input.kind='{}' 非 book/trade", i, r.input.kind);
       return std::unexpected(Error::ConfigInvalid);
-    if (r.output.path.empty()) return std::unexpected(Error::ConfigInvalid);   // 段名必填
-    if (!seen_paths.insert(r.output.path).second)                              // 段名两两不同
-      return std::unexpected(Error::ConfigInvalid);                           //   防多路互覆盖同段
-    if (r.start_ns > r.end_ns) return std::unexpected(Error::ConfigInvalid);
+    }
+    if (r.input.format != "csv" && r.input.format != "json" && r.input.format != "auto") {
+      spdlog::error("config: replay#{} input.format='{}' 非 csv/json/auto", i, r.input.format);
+      return std::unexpected(Error::ConfigInvalid);
+    }
+    if (r.output.path.empty()) {  // 段名必填
+      spdlog::error("config: replay#{} output.path 为空(shm 段名必填)", i);
+      return std::unexpected(Error::ConfigInvalid);
+    }
+    if (!seen_paths.insert(r.output.path).second) {  // 段名两两不同,防多路互覆盖同段
+      spdlog::error("config: replay#{} output.path='{}' 与前面某路重复(段名须两两不同)", i, r.output.path);
+      return std::unexpected(Error::ConfigInvalid);
+    }
+    if (r.start_ns > r.end_ns) {
+      spdlog::error("config: replay#{} start({}) > end({})", i, r.start_ns, r.end_ns);
+      return std::unexpected(Error::ConfigInvalid);
+    }
   }
 
   return cfg;

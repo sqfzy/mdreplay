@@ -159,18 +159,21 @@ struct Output {
 }
 
 // 探测输入档数(决定 book 输出段:1=BookTickBoard / >1=DepthBoard)。取首个非空源首条记录档数;
-// 各源不一致 → WARN。无记录 → 默认 1。
-[[nodiscard]] std::size_t detect_depth(const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
-  std::size_t depth = 1;
-  bool        found = false;
+// 一路内各源档数必须一致——不一致即 nullopt(段只有一种档数,WARN-截断会静默丢档,违「绝不截断」)。无记录 → 1。
+[[nodiscard]] std::optional<std::size_t> detect_depth(
+    const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
+  std::optional<std::size_t> depth;
   for (const auto& s : sources) {
     const mdreplay::Record* r = s->peek();
     if (!r) continue;
-    if (!found) { depth = r->depth; found = true; }
-    else if (r->depth != depth)
-      spdlog::warn("源间输入档数不一致(首源 {} 档,另有 {} 档)", depth, r->depth);
+    if (!depth) depth = r->depth;
+    else if (r->depth != *depth) {
+      spdlog::error("一路内各源档数不一致(有 {} 档也有 {} 档);单段只容一种档数,拒绝该路"
+                    "(请把不同档数的输入分到不同 [[replays]])", *depth, r->depth);
+      return std::nullopt;
+    }
   }
-  return depth;
+  return depth.value_or(1);
 }
 
 // 载入一路输入:discover 该路 dir/kind/format 下的文件,逐个建流式 Source。单文件错误命名跳过、不中断。
@@ -189,6 +192,21 @@ load_sources(const mdreplay::InputCfg& in, Kind kind, mdreplay::SkipStats& skips
   return sources;
 }
 
+// init_ts + realtime>0:把首事件的播出墙钟延迟显式打出来 —— init_ts 远离数据范围(如手滑写 0)会让
+// 首事件睡数十年像卡死,这条 INFO 让它一眼可见(peek 幂等,不消费,Merger 仍能拿到同一首条)。
+void log_first_event_delay(const Config& cfg,
+                           const std::vector<std::unique_ptr<mdreplay::Source>>& sources) {
+  if (!cfg.init_ts || cfg.realtime <= 0.0) return;
+  std::optional<std::int64_t> min_ts;
+  for (const auto& s : sources)
+    if (const mdreplay::Record* r = s->peek())
+      min_ts = (min_ts && *min_ts <= r->ts_ns) ? min_ts : std::optional(r->ts_ns);
+  if (!min_ts) return;
+  const double delay_s = static_cast<double>(*min_ts - *cfg.init_ts) * cfg.realtime / 1e9;
+  spdlog::info("init_ts={}ns → 首事件(ts={}ns)约 {:.1f}s 后播出;若异常大/为负,多半 init_ts 偏离数据范围",
+               *cfg.init_ts, *min_ts, delay_s);
+}
+
 // 全局归并 + 按 unit 路由回放。
 void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> sources,
             std::vector<std::size_t> src_unit,
@@ -197,16 +215,19 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
   mdreplay::Merger   merger(std::move(sources), std::move(src_unit), std::move(unit_window));
   mdreplay::Clock    clock(cfg.realtime, cfg.init_ts);  // init_ts 缺省=自动锚首个被回放事件
   mdreplay::Reporter reporter(cfg.progress_sec, skips);  // skip 惰性累加,reporter 实时读 total
+  std::uint64_t      write_fails = 0;                    // sink 写失败计数(不丢信号,收尾 WARN)
   while (!mdreplay::stop_requested()) {
     const auto tagged = merger.next();
     if (!tagged) break;
     const mdreplay::Record& rec = tagged->rec;
     clock.pace_to(rec.ts_ns, mdreplay::g_stop_requested);
     if (mdreplay::stop_requested()) break;  // pacing 被信号打断 → 不发这条半路事件,停在干净边界
-    (void)opens[tagged->unit].sink->write(rec);  // 按 unit 路由到对应 Sink
+    if (!opens[tagged->unit].sink->write(rec)) ++write_fails;  // 按 unit 路由;写失败计数、不静默吞
     reporter.on_event(rec);
   }
   reporter.finish();
+  if (write_fails > 0)  // 正常回放恒 0;>0 = sink 写入有失败(段满/契约异常),不该静默
+    spdlog::warn("sink 写入失败 {} 条(未落段);请检查输出段状态", write_fails);
 }
 
 // 载入一路 + 开输出 + 把其源拼进全局列表(记 unit)。返回 false = 该路无源/开输出失败(已报错)。
@@ -229,7 +250,12 @@ void replay(const Config& cfg, std::vector<std::unique_ptr<mdreplay::Source>> so
     spdlog::error("replay#{}: no *.{}.{} under '{}'", unit, in.kind, in.format, in.dir);
     return false;
   }
-  const std::size_t depth = (kind == Kind::Book) ? detect_depth(sources) : 1;
+  std::size_t depth = 1;
+  if (kind == Kind::Book) {
+    const auto d = detect_depth(sources);  // 一路内档数不一致 → 已报错,拒该路
+    if (!d) return false;
+    depth = *d;
+  }
 
   auto out = open_output(rc.output, kind, depth);
   if (!out) {
@@ -280,6 +306,7 @@ int main(int argc, char** argv) {
   }
   spdlog::info("loaded {} replays, {} sources total, realtime={}", cfg->replays.size(),
                global_sources.size(), cfg->realtime);
+  log_first_event_delay(*cfg, global_sources);  // init_ts 偏离数据 → 首事件超长延迟一眼可见
 
   replay(*cfg, std::move(global_sources), std::move(src_unit), std::move(unit_window), opens, skips);
   for (auto& o : opens) o.sink->on_finish();  // 各路去向相关收尾(trade 环绕圈告警等)
