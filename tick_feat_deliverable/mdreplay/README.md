@@ -2,7 +2,7 @@
 
 通用**单入单出**记录回放:读录制的逐笔行情文件(csv/json),按时序重放到 **gconf v1.2.2 shm 段**
 (book → `BookTickBoard` 单档 BBO;trade → 旧 `TradeRing`,临时)。主用途是给下游(特征引擎等)当实盘 WS feed 的替身。
-book 输入需带 `update_id` 列(交易所盘口更新序号)。端到端集成测试见 `booktick_e2e.sh`。
+book 输入需带 `update_id` 列(交易所盘口更新序号)。端到端集成测试见 `test/`:`booktick_e2e.sh`(BBO)/ `depth_e2e.sh`(5 档)/ `depth25_e2e.sh`(满档 25)/ `trade_e2e.sh`(成交)。
 
 **独立、普适**:只依赖 gconf v2 段契约(vendored 进 `gconf/`)+ `toml++` / `spdlog` / `nlohmann_json`。
 不绑任何上游/下游项目的私有格式或口径——只认「带时间戳的记录流」。**全 header-only,零第三方解析库**。
@@ -86,10 +86,13 @@ create = true                       # 建段(O_TRUNC 幂等)/ false=attach
 cd mdreplay
 xmake build mdreplay
 xmake build test && xmake run test          # 单元 + e2e 测试
+bash test/depth25_e2e.sh                     # 端到端(满档 25 档 book → DepthBoard)
+bash test/trade_e2e.sh                       # 端到端(成交 → TradeRing,drain 读回)
 
 # 备测试数据(由 mdreplay 之外的 tick_feat 侧导出器生成,不属于 mdreplay):
-python3 ../formatted_to_datas.py --out datas            # 1 档(BBO,默认)
-python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
+python3 ../formatted_to_datas.py --out datas             # 1 档(BBO,默认)
+python3 ../formatted_to_datas.py --out datas5  --depth 5  # 5 档
+python3 ../formatted_to_datas.py --out datas25 --depth 25 # 25 档(第 16-25 档为合成外推;源仅 15 档真实)
 
 # 回放 book → BookTickBoard 段(尽快、可复现);trade 同理另跑一遍。book 输入需带 update_id 列;多档输入取 L0 BBO
 ./build/linux/x86_64/release/mdreplay --kind book  --output.path /shm_bybit_lin_book_tick --output.create true --realtime 0
@@ -109,10 +112,10 @@ python3 ../formatted_to_datas.py --out datas5 --depth 5 # 5 档
   不写则默认各锚首事件(单进程零负担)。`system_ts` 用 `system_clock`(UTC)。**代码强制不许 burst**:
   若 `system_ts` 在过去、或 `data_ts` 落在数据中间致**最早被回放的事件**播出墙钟已过去 → **拒启动**(报错指出
   首条 ts、要把 data_ts 设 ≤ 它、system_ts 取足够未来)。`data_ts` 居中但 `system_ts` 够远(首事件仍不 burst)则放行。
-  **省心法:`replay_sync.sh`** —— 给**任意 N 个**单入单出单元自动盖同一个 anchor(book/trade 只是 N=2),
+  **省心法:`tools/replay_sync.sh`** —— 给**任意 N 个**单入单出单元自动盖同一个 anchor(book/trade 只是 N=2),
   自动算共享 `system_ts`(now+delay)与 `data_ts`(扫全局最早 ts,零 burst),Ctrl-C 一次干净停全部:
   ```bash
-  ./replay_sync.sh --realtime 1 \
+  ./tools/replay_sync.sh --realtime 1 \
     --run "--kind book  --dir formatted_2h --output.path /shm_book" \
     --run "--kind trade --dir formatted_2h --output.path /shm_trade"
   ```

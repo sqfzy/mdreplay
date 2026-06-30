@@ -9,7 +9,9 @@ update_id(mdreplay book 输入必填):formatted 无交易所真值 seqno → 这
     (每文件即每 symbol,按 ts 序 1,2,3... 递增)。严格单调 → mdreplay claim_if_newer 去重恒 0。
     注:非交易所真值,仅为让 book 回放开箱可跑;要真值须改 format_jsonl.py 从 raw WS 带出(另开任务)。
 
-档数:formatted 源仅 15 档(bp0..bp14)→ --depth ∈ {1,5,10,15};mdreplay 引擎支持到 25,但 20/25 无源数据。
+档数:formatted 源仅 15 档(bp0..bp14)。--depth ∈ {1,5,10,15,20,25}:
+    ≤15 取真实档;20/25 的第 16-25 档为**合成外推**(整数空间按最后一档真实间距线性延伸,严格单调),
+    仅供端到端验证 mdreplay 引擎 25 档能力,**非真实盘口**(真值需 format_jsonl.py 从 raw WS 带出)。
 
 换算口径(已对源数据核实):
     ts    epoch µs → ns(×1000)
@@ -38,15 +40,23 @@ BP0, BA0, AP0, AA0 = 4, 19, 34, 49
 TRADE_HEADER = ["ts", "symbol", "side", "px", "qty"]
 
 
-def unscale_1e8(int_str: str) -> str:
-    """×1e8 整数字符串 → 十进制字符串(整数移位,精确无浮点)。"""
-    n = int(int_str)
+def unscale_1e8_int(n: int) -> str:
+    """×1e8 整数 → 十进制字符串(整数移位,精确无浮点)。"""
     s = f"{n // 100_000_000}.{n % 100_000_000:08d}".rstrip("0").rstrip(".")
     return s or "0"
 
 
+def unscale_1e8(int_str: str) -> str:
+    """×1e8 整数字符串 → 十进制字符串。"""
+    return unscale_1e8_int(int(int_str))
+
+
+# 真实档数上限:formatted 源仅 15 档(bp0..bp14)。depth>SRC_DEPTH 的档为合成外推(见 book_row)。
+SRC_DEPTH = 15
+
+
 def book_header(depth: int) -> list[str]:
-    """book 表头:update_id 紧随 symbol;level0 不带后缀(= BBO),k≥1 为 bid_px_k 等。depth ∈ {1,5,10,15}。"""
+    """book 表头:update_id 紧随 symbol;level0 不带后缀(= BBO),k≥1 为 bid_px_k 等。depth ∈ {1,5,10,15,20,25}。"""
     cols = ["ts", "symbol", "update_id"]
     for k in range(depth):
         s = "" if k == 0 else f"_{k}"
@@ -54,12 +64,38 @@ def book_header(depth: int) -> list[str]:
     return cols
 
 
+def _synth_px(base: int, gap: int, step: int, down: bool) -> int:
+    """合成深档价(整数 ×1e8)。base<=0 即真实尾档缺失(薄盘)→ 0(不凭空造价,与 depth15 一致);
+    否则按 gap 线性外推,bid 下推钳到 ≥0(绝不为负 → 杜绝 bad_number)。"""
+    if base <= 0:
+        return 0
+    v = base - step * gap if down else base + step * gap
+    return v if v > 0 else 0
+
+
 def book_row(row: list[str], ts_ns: int, symbol: str, depth: int, update_id: int) -> list:
-    """从 64 列 OB 行取 depth 档(价 ×1e8→十进制,量原值透传);update_id = per-symbol 单调计数器。"""
+    """从 64 列 OB 行取 depth 档;update_id = per-symbol 单调计数器。
+
+    k < SRC_DEPTH(15):真实档(价 ×1e8→十进制,量原值透传)。
+    k >= SRC_DEPTH:**合成外推**(源无此深档)——在 ×1e8 整数空间按「最后一档真实间距」线性延伸:
+        bid_px[k] = bp_int[14] - (k-14)*gap_bid,  gap_bid = max(bp_int[13]-bp_int[14], 1)  → 递减
+        ask_px[k] = ap_int[14] + (k-14)*gap_ask,  gap_ask = max(ap_int[14]-ap_int[13], 1)  → 递增
+    gap 钳到 ≥1(防平盘/逆序);**薄盘(尾档=0)→ 合成档也置 0**,bid 下推钳到 ≥0(见 _synth_px)。
+    整数算完再 unscale(零浮点)。量复用第 14 档真实量。仅 depth∈{20,25} 触发。
+    """
     out: list = [ts_ns, symbol, update_id]
+    last = SRC_DEPTH - 1  # 14
+    bp_last, ap_last = int(row[BP0 + last]), int(row[AP0 + last])
+    gap_bid = max(int(row[BP0 + last - 1]) - bp_last, 1)
+    gap_ask = max(ap_last - int(row[AP0 + last - 1]), 1)
     for k in range(depth):
-        out += [unscale_1e8(row[BP0 + k]), row[BA0 + k],
-                unscale_1e8(row[AP0 + k]), row[AA0 + k]]
+        if k < SRC_DEPTH:
+            out += [unscale_1e8(row[BP0 + k]), row[BA0 + k],
+                    unscale_1e8(row[AP0 + k]), row[AA0 + k]]
+        else:  # 合成外推档:整数空间线性延伸,量沿用第 14 档真实量(薄盘则尾档量本就 0)
+            step = k - last
+            out += [unscale_1e8_int(_synth_px(bp_last, gap_bid, step, down=True)), row[BA0 + last],
+                    unscale_1e8_int(_synth_px(ap_last, gap_ask, step, down=False)), row[AA0 + last]]
     return out
 
 
@@ -140,9 +176,10 @@ def main() -> int:
     ap.add_argument("--src", default="formatted_2h", help="源目录(默认 formatted_2h)")
     ap.add_argument("--out", default="datas", help="输出目录(默认 datas)")
     ap.add_argument("--dry-run", action="store_true", help="只统计不落盘")
-    ap.add_argument("--depth", type=int, default=1, choices=(1, 5, 10, 15),
-                    help="book 档数:1(BBO,默认)/5/10/15。formatted 源仅 15 档,故封顶 15;"
-                         "mdreplay 引擎支持到 25,但 20/25 无源数据")
+    ap.add_argument("--depth", type=int, default=1, choices=(1, 5, 10, 15, 20, 25),
+                    help="book 档数:1(BBO,默认)/5/10/15/20/25。formatted 源仅 15 档真实数据;"
+                         "20/25 档的第 16-25 档为**合成外推**(整数空间按最后一档真实间距线性延伸),"
+                         "仅供压测/端到端验证引擎 25 档能力,非真实盘口")
     ap.add_argument("--by-venue", action="store_true",
                     help="按 venue 分子目录(out/<venue>/<symbol>.*.csv),供 mdreplay 每 venue 一个段")
     args = ap.parse_args()

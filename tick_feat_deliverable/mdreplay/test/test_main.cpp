@@ -611,6 +611,20 @@ static void test_depth_board() {
   CHECK(sink.write(stale).has_value());
   CHECK(sink.deduped() == 1);
   CHECK(board->slot[19].read(out) && out.update_id == 100 && out.bid_px[0] == 6884);  // 未被陈旧覆盖
+
+  // 满档 depth=25(kMaxDepth):全 25 档写入、逐档读回(更高 update_id 赢、覆盖旧值)
+  Record full;
+  full.kind = Kind::Book; full.ts_ns = 8000; full.update_id = 200; full.gid = 19;
+  full.price_scale = 2; full.qty_scale = 0; full.depth = kMaxDepth;  // 25
+  for (std::size_t k = 0; k < kMaxDepth; ++k) {
+    full.bid_px[k] = 6885 - k; full.bid_qty[k] = 15 + k; full.ask_px[k] = 6886 + k; full.ask_qty[k] = 25 + k;
+  }
+  CHECK(sink.write(full).has_value());
+  CHECK(board->slot[19].read(out));
+  CHECK(out.update_id == 200 && out.depth == kMaxDepth);
+  CHECK(out.bid_px[0]  == 6885 && out.ask_px[0]  == 6886);  // L0
+  CHECK(out.bid_px[24] == 6861 && out.ask_px[24] == 6910);  // L24(末档):6885-24 / 6886+24
+  CHECK(out.bid_qty[24] == 39 && out.ask_qty[24] == 49);    // 量末档:15+24 / 25+24
 }
 
 // 退化文件:只有表头 → 载入成功但空源(不崩);真空文件(无表头)→ CsvSchema。
