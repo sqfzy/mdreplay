@@ -9,7 +9,7 @@
 set -uo pipefail
 shopt -s nullglob
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # 脚本在 test/,工程根在上一级
 readonly BIN="$SCRIPT_DIR/build/linux/x86_64/release/mdreplay"
 readonly DATAS="$SCRIPT_DIR/datas"
 readonly CEILING_MB=50   # 绝对上限:超过即疑似整文件入内存
@@ -19,14 +19,23 @@ die() { echo "mem_check: $*" >&2; exit 1; }
 
 # 跑一次 book 回放(realtime=0 尽快、输出 /dev/null),采峰值 RssAnon(MB)。$1=输入目录
 peak_rss_anon_mb() {
-  "$BIN" --kind trade --dir "$1" --format csv --output.path /shm_memcheck --output.create true --realtime 0 \
-    >/dev/null 2>&1 &
+  local cfg; cfg="$(mktemp)"
+  cat > "$cfg" <<EOF
+realtime = 0
+[[replays]]
+input  = { format = "csv", dir = "$1", kind = "trade" }
+output = { path = "/shm_memcheck", create = true }
+[log]
+level = "error"
+EOF
+  "$BIN" --config "$cfg" >/dev/null 2>&1 &
   local pid=$! hwm=0 v
   while kill -0 "$pid" 2>/dev/null; do
     v=$(awk '/^RssAnon:/{print $2}' "/proc/$pid/status" 2>/dev/null)
     [ -n "${v:-}" ] && [ "$v" -gt "$hwm" ] && hwm="$v"
     sleep 0.02
   done
+  rm -f "$cfg"
   echo "$(( hwm / 1024 ))"
 }
 

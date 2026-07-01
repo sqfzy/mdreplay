@@ -1,5 +1,5 @@
 #pragma once
-// discover.hpp — 扫输入目录,挑指定 kind + 格式的文件(单入单出:一次一种)。
+// discover.hpp — 扫输入目录,挑指定 kind + 格式的文件(每路 [[replays]] 各扫自己的 dir/kind/format)。
 // Kind::Book + "csv" → *.book.csv;Kind::Trade + "json" → *.trade.json。
 // 按路径排序 → 固定源序(确定性归并的基础)。
 

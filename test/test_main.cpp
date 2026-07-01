@@ -112,10 +112,10 @@ static void test_clock() {
 
   std::atomic<bool> never{false};
   Clock c(1.0);
-  CHECK(!c.anchored());
-  c.pace_to(1000, never);  // realtime=1 但首拍只锚定、立即返回
-  CHECK(c.anchored());
-  CHECK(c.offset_ns(1000) == 0);     // 锚点本身偏移 0
+  CHECK(!c.started());
+  c.pace_to(1000, never);  // realtime=1 首拍:墙钟原点=now、ts0=首事件,偏移 0 立即返回
+  CHECK(c.started());
+  CHECK(c.offset_ns(1000) == 0);     // ts0 本身偏移 0
   CHECK(c.offset_ns(2000) == 1000);  // 绝对量:(2000-1000)×1.0
   CHECK(c.offset_ns(5000) == 4000);  // 不累积漂移,仍按绝对差
 
@@ -148,6 +148,12 @@ static void test_signal() {
   g_stop_requested.store(false);            // 复位,免污染后续测试
 }
 
+// 单 unit 便捷:全部源归 unit 0,一个窗口。
+static std::vector<std::size_t> all_unit0(std::size_t n) { return std::vector<std::size_t>(n, 0); }
+static std::vector<std::pair<std::int64_t, std::int64_t>> one_window(std::int64_t s, std::int64_t e) {
+  return {{s, e}};
+}
+
 static void test_merge() {
   using namespace mdreplay;
   // 两源交错 → 全局有序
@@ -155,9 +161,9 @@ static void test_merge() {
     std::vector<std::unique_ptr<Source>> s;
     s.push_back(make_src({100, 103, 105}, 1));
     s.push_back(make_src({101, 102, 106}, 2));
-    Merger m(std::move(s), kNoStart, kNoEnd);
+    Merger m(std::move(s), all_unit0(2), one_window(kNoStart, kNoEnd));
     std::vector<std::int64_t> out;
-    while (auto r = m.next()) out.push_back(r->ts_ns);
+    while (auto r = m.next()) out.push_back(r->rec.ts_ns);
     CHECK((out == std::vector<std::int64_t>{100, 101, 102, 103, 105, 106}));
   }
   // 同 ts → 源序 tiebreak(src0 先于 src1)
@@ -165,66 +171,109 @@ static void test_merge() {
     std::vector<std::unique_ptr<Source>> s;
     s.push_back(make_src({100, 200}, 10));  // src0
     s.push_back(make_src({100, 200}, 20));  // src1
-    Merger m(std::move(s), kNoStart, kNoEnd);
+    Merger m(std::move(s), all_unit0(2), one_window(kNoStart, kNoEnd));
     std::vector<std::uint16_t> gids;
-    while (auto r = m.next()) gids.push_back(r->gid);
+    while (auto r = m.next()) gids.push_back(r->rec.gid);
     CHECK((gids == std::vector<std::uint16_t>{10, 20, 10, 20}));
   }
   // 时间窗闭区间 [200,300]
   {
     std::vector<std::unique_ptr<Source>> s;
     s.push_back(make_src({100, 200, 300, 400}, 1));
-    Merger m(std::move(s), 200, 300);
+    Merger m(std::move(s), all_unit0(1), one_window(200, 300));
     std::vector<std::int64_t> w;
-    while (auto r = m.next()) w.push_back(r->ts_ns);
+    while (auto r = m.next()) w.push_back(r->rec.ts_ns);
     CHECK((w == std::vector<std::int64_t>{200, 300}));
   }
   // 窗口空集(start 高于全部)
   {
     std::vector<std::unique_ptr<Source>> s;
     s.push_back(make_src({100, 200}, 1));
-    Merger m(std::move(s), 500, kNoEnd);
+    Merger m(std::move(s), all_unit0(1), one_window(500, kNoEnd));
     CHECK(!m.next().has_value());
+  }
+  // 多 unit:src0→unit0、src1→unit1;全局有序 + 每条带正确 unit + per-unit 窗口各管各
+  {
+    std::vector<std::unique_ptr<Source>> s;
+    s.push_back(make_src({100, 200, 300}, 11));  // src0 → unit0,窗口 [150,250]
+    s.push_back(make_src({120, 220, 320}, 22));  // src1 → unit1,窗口无界
+    Merger m(std::move(s), std::vector<std::size_t>{0, 1},
+             std::vector<std::pair<std::int64_t, std::int64_t>>{{150, 250}, {kNoStart, kNoEnd}});
+    std::vector<std::pair<std::int64_t, std::size_t>> got;  // (ts, unit)
+    while (auto r = m.next()) got.emplace_back(r->rec.ts_ns, r->unit);
+    // unit0 只剩 200(100<150 跳过、300>250 丢);unit1 全保留;全局按 ts 升序
+    CHECK((got == std::vector<std::pair<std::int64_t, std::size_t>>{
+                      {120, 1}, {200, 0}, {220, 1}, {320, 1}}));
+  }
+  // 跨 unit 同 ts → tiebreak 严格按 unit-major 源下标(可复现命根:同 ts 谁先出必须确定)
+  {
+    std::vector<std::unique_ptr<Source>> s;
+    s.push_back(make_src({200, 200}, 11));  // src0 → unit0(全在同一 ts 200)
+    s.push_back(make_src({200, 200}, 22));  // src1 → unit1
+    Merger m(std::move(s), std::vector<std::size_t>{0, 1},
+             std::vector<std::pair<std::int64_t, std::int64_t>>{{kNoStart, kNoEnd}, {kNoStart, kNoEnd}});
+    std::vector<std::size_t> units;
+    while (auto r = m.next()) units.push_back(r->unit);
+    // 同 ts:源下标小(unit0)先于源下标大(unit1),逐条交替不乱 → 确定序
+    CHECK((units == std::vector<std::size_t>{0, 0, 1, 1}));
   }
 }
 
 static void test_config() {
   using namespace mdreplay;
-  // happy:input.kind / realtime / dir / output 解析
+  // happy:顶层 realtime + 单路 [[replays]](input/output inline 表 + per-replay 窗口)
   {
     const auto c = parse_config(toml::parse(R"(
-      [input]
-      dir = "d"
-      kind = "trade"
-      [replay]
       realtime = 0.5
-      [output]
-      format = "shm"
-      path = "/s"
+      [[replays]]
+      input  = { format = "csv", dir = "d", kind = "trade" }
+      output = { path = "/s", create = true }
     )"));
     CHECK(c.has_value());
     CHECK(c->realtime == 0.5);
-    CHECK(c->dir == "d" && c->input_kind == "trade");
-    CHECK(c->output.path == "/s");
-    CHECK(c->start_ns == kNoStart && c->end_ns == kNoEnd);  // 空窗口 → 无界
+    CHECK(c->replays.size() == 1);
+    CHECK(c->replays[0].input.dir == "d" && c->replays[0].input.kind == "trade");
+    CHECK(c->replays[0].output.path == "/s");
+    CHECK(c->replays[0].start_ns == kNoStart && c->replays[0].end_ns == kNoEnd);  // 空窗口 → 无界
+    CHECK(!c->init_ts);  // 没配 init_ts → 自动
   }
-  CHECK(!parse_config(toml::parse("[replay]\nrealtime=2.0\n[output]\npath=\"/s\"")).has_value());  // 坏 realtime
-  CHECK(!parse_config(toml::parse("[output]\ncreate=true")).has_value());                          // 缺 path(段名必填)
-  CHECK(!parse_config(toml::parse("[output]\npath=\"/s\"\n[input]\nkind=\"xxx\"")).has_value());    // 坏 kind
-  CHECK(!parse_config(toml::parse("[input]\ndir=\"d\"")).has_value());                          // 无 output
-  // datetime 窗口 → 整秒 ns
+  // 多路:两路各自 input/output;路由/校验靠 output.path 两两不同
   {
     const auto c = parse_config(toml::parse(R"(
-      [replay]
-      start = "2026-06-23 00:00:00"
-      [output]
-      format = "shm"
-      path = "/s"
+      [[replays]]
+      input  = { dir = "a", kind = "book" }
+      output = { path = "/a" }
+      [[replays]]
+      input  = { dir = "b", kind = "trade" }
+      output = { path = "/b" }
+    )"));
+    CHECK(c.has_value() && c->replays.size() == 2);
+    CHECK(c->replays[0].output.path == "/a" && c->replays[1].input.kind == "trade");
+  }
+  // 坏 realtime / 缺 path / 坏 kind / 空 replays / output.path 重复 / 缺 input 或 output / start>end
+  CHECK(!parse_config(toml::parse("realtime=2.0\n[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}")).has_value());
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={create=true}")).has_value());  // 缺 path
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"xxx\"}\noutput={path=\"/s\"}")).has_value());   // 坏 kind
+  CHECK(!parse_config(toml::parse("realtime=1.0")).has_value());                                                       // 空 replays
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"a\",kind=\"book\"}\noutput={path=\"/x\"}\n[[replays]]\ninput={dir=\"b\",kind=\"book\"}\noutput={path=\"/x\"}")).has_value());  // path 重复
+  CHECK(!parse_config(toml::parse("[[replays]]\noutput={path=\"/s\"}")).has_value());                                  // 缺 input
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\nstart=\"2026-06-23 02:00:00\"\nend=\"2026-06-23 01:00:00\"")).has_value());  // start>end
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",format=\"parquet\",kind=\"book\"}\noutput={path=\"/s\"}")).has_value());  // 坏 format
+  CHECK(parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",format=\"auto\",kind=\"book\"}\noutput={path=\"/s\"}")).has_value());      // auto 受支持
+  CHECK(parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\nstart=\"2026-06-23 01:00:00\"\nend=\"2026-06-23 01:00:00\"")).has_value());  // start==end 单点窗放行
+  // per-replay datetime 窗口 → 整秒 ns
+  {
+    const auto c = parse_config(toml::parse(R"(
+      [[replays]]
+      input  = { dir = "d", kind = "book" }
+      output = { path = "/s" }
+      start  = "2026-06-23 00:00:00"
     )"));
     CHECK(c.has_value());
-    CHECK(c->start_ns != kNoStart && c->start_ns > 0 && c->start_ns % 1'000'000'000LL == 0);
+    const auto s = c->replays[0].start_ns;
+    CHECK(s != kNoStart && s > 0 && s % 1'000'000'000LL == 0);
   }
-  CHECK(!parse_config(toml::parse("[replay]\nstart=\"bad\"\n[output]\nformat=\"shm\"\npath=\"/s\"")).has_value());  // 坏 datetime
+  CHECK(!parse_config(toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\nstart=\"bad\"")).has_value());  // 坏 datetime
 }
 
 static void test_e2e() {
@@ -289,7 +338,7 @@ static void test_e2e() {
   }
 }
 
-// CSV 解析委托 csv-parser 后的新能力:带引号/转义字段正确解析(旧手写 split 会把引号留在值里 →
+// 手写 CSV 解析(input/csv.hpp)的引号能力:带引号/转义字段正确解析(朴素 split 会把引号留在值里 →
 // fixed.hpp 拒为非数字 → 整行静默跳)。同时验证列数不符的 ragged 行仍计数跳过。
 static void test_csv_quoting() {
   using namespace mdreplay;
@@ -401,60 +450,54 @@ static void test_book_depth5() {
   fs::remove_all(dir);
 }
 
-// 时序锚:同一 anchor 的两 Clock 对同一 ts 算出同一墙钟目标(= 跨进程同钟的根据);config 两端齐才启用。
-static void test_anchor() {
+// init_ts:手动数据原点(对齐到首拍墙钟 now)。构造即定 ts0,早于 ts0 的事件偏移钳到 0;缺省=自动锚首事件。
+static void test_init_ts() {
   using namespace mdreplay;
-  // realtime=1:墙钟间隔 = 数据间隔;两 Clock 同 anchor → 同 ts 同目标
-  const Clock::Anchor a{1000, 5000};  // data_ts=1000ns ↔ system_ts=5000ns
-  Clock               c1(1.0, a), c2(1.0, a);
-  CHECK(c1.target_system_ns(2000) == c2.target_system_ns(2000));
-  CHECK(c1.target_system_ns(2000) == 5000 + (2000 - 1000));
-  // realtime=0.5(2× 速):数据 2000ns 跨度 → 墙钟 1000ns
-  Clock h(0.5, Clock::Anchor{1000, 5000});
-  CHECK(h.target_system_ns(3000) == 5000 + static_cast<std::int64_t>((3000 - 1000) * 0.5));
+  std::atomic<bool> never{false};
 
-  // would_burst:首事件 target 落在过去 → true(拒启动判据)
-  const std::int64_t now = 1'000'000;
-  Clock              ok(1.0, Clock::Anchor{0, now});      // data_ts=0,system_ts=now
-  CHECK(!ok.would_burst(0, now));                          // target=now,不算 burst(>=)
-  CHECK(!ok.would_burst(50, now));                         // target=now+50 > now
-  Clock mid(1.0, Clock::Anchor{100, now});                // data_ts=100 落在数据中间
-  CHECK(mid.would_burst(50, now));                         // ts=50<100 → target=now-50 < now → burst
-  CHECK(!mid.would_burst(100, now));                       // ts=100=data_ts → target=now
-  Clock no_anchor(1.0);
-  CHECK(!no_anchor.would_burst(0, now));                   // 无 anchor → 无 burst 概念
-  Clock asap(0.0, Clock::Anchor{100, now});
-  CHECK(!asap.would_burst(50, now));                       // realtime=0 → 不限速,无 burst 概念
+  // 手动 init_ts=1000:ts0 构造即定,offset 相对它算
+  Clock c(1.0, std::optional<std::int64_t>{1000});
+  CHECK(c.offset_ns(1000) == 0);      // ts0 本身偏移 0
+  CHECK(c.offset_ns(3000) == 2000);   // (3000-1000)×1
+  CHECK(c.offset_ns(500) == 0);       // 早于 ts0 → 钳到 0(立即播,不回到过去)
+  c.pace_to(2000, never);             // 首拍后 ts0 仍=1000(不被首事件覆盖)
+  CHECK(c.started() && c.offset_ns(2000) == 1000);
 
-  // config:两端齐 → 启用(ns 写法)
+  // realtime=0.5(2× 速)
+  Clock h(0.5, std::optional<std::int64_t>{1000});
+  CHECK(h.offset_ns(3000) == static_cast<std::int64_t>((3000 - 1000) * 0.5));
+
+  // 无 init_ts:自动锚首个被回放事件
+  Clock a(1.0);
+  a.pace_to(5000, never);
+  CHECK(a.offset_ns(5000) == 0 && a.offset_ns(6000) == 1000);
+
+  // realtime=0:尽快,offset 恒 0(纯逻辑序、可复现)
+  Clock z(0.0, std::optional<std::int64_t>{1000});
+  CHECK(z.offset_ns(9999) == 0);
+
+  // config:顶层 init_ts(ns 写法)
   {
     const auto t = toml::parse(
-        "[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
-        "[replay]\nanchor = { data_ts = 1000, system_ts = 5000 }\n");
+        "init_ts = 1000\n[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\n");
     const auto cfg = parse_config(t);
-    CHECK(cfg.has_value() && cfg->anchor && cfg->anchor->data_ts_ns == 1000 &&
-          cfg->anchor->system_ts_ns == 5000);
+    CHECK(cfg.has_value() && cfg->init_ts && *cfg->init_ts == 1000);
   }
   // config:datetime 写法,值 = parse_datetime_ns 口径
   {
     const auto t = toml::parse(
-        "[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
-        "[replay]\nanchor = { data_ts = \"2026-06-23 08:00:00\", system_ts = \"2026-06-25 14:00:00\" }\n");
+        "init_ts = \"2026-06-23 08:00:00\"\n[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\n");
     const auto cfg = parse_config(t);
-    CHECK(cfg.has_value() && cfg->anchor &&
-          cfg->anchor->data_ts_ns == *parse_datetime_ns("2026-06-23 08:00:00", 0));
+    CHECK(cfg.has_value() && cfg->init_ts && *cfg->init_ts == *parse_datetime_ns("2026-06-23 08:00:00", 0));
   }
-  // 只给一半 → 映射不完整 → ConfigInvalid
+  // 坏 init_ts → ConfigInvalid
+  CHECK(!parse_config(toml::parse(
+      "init_ts = \"bad\"\n[[replays]]\ninput={dir=\"d\",kind=\"book\"}\noutput={path=\"/s\"}\n")).has_value());
+  // 不写 init_ts → nullopt(自动)
   {
-    const auto t = toml::parse("[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n"
-                               "[replay]\nanchor = { data_ts = 1000 }\n");
-    CHECK(!parse_config(t).has_value());
-  }
-  // 不写 anchor → 不启用(默认)
-  {
-    const auto t   = toml::parse("[input]\ndir=\"d\"\n[output]\nformat=\"csv\"\npath=\"o\"\n");
+    const auto t   = toml::parse("[[replays]]\ninput={dir=\"d\",kind=\"trade\"}\noutput={path=\"/s\"}\n");
     const auto cfg = parse_config(t);
-    CHECK(cfg.has_value() && !cfg->anchor);
+    CHECK(cfg.has_value() && !cfg->init_ts);
   }
 }
 
@@ -611,6 +654,20 @@ static void test_depth_board() {
   CHECK(sink.write(stale).has_value());
   CHECK(sink.deduped() == 1);
   CHECK(board->slot[19].read(out) && out.update_id == 100 && out.bid_px[0] == 6884);  // 未被陈旧覆盖
+
+  // 满档 depth=25(kMaxDepth):全 25 档写入、逐档读回(更高 update_id 赢、覆盖旧值)
+  Record full;
+  full.kind = Kind::Book; full.ts_ns = 8000; full.update_id = 200; full.gid = 19;
+  full.price_scale = 2; full.qty_scale = 0; full.depth = kMaxDepth;  // 25
+  for (std::size_t k = 0; k < kMaxDepth; ++k) {
+    full.bid_px[k] = 6885 - k; full.bid_qty[k] = 15 + k; full.ask_px[k] = 6886 + k; full.ask_qty[k] = 25 + k;
+  }
+  CHECK(sink.write(full).has_value());
+  CHECK(board->slot[19].read(out));
+  CHECK(out.update_id == 200 && out.depth == kMaxDepth);
+  CHECK(out.bid_px[0]  == 6885 && out.ask_px[0]  == 6886);  // L0
+  CHECK(out.bid_px[24] == 6861 && out.ask_px[24] == 6910);  // L24(末档):6885-24 / 6886+24
+  CHECK(out.bid_qty[24] == 39 && out.ask_qty[24] == 49);    // 量末档:15+24 / 25+24
 }
 
 // 退化文件:只有表头 → 载入成功但空源(不崩);真空文件(无表头)→ CsvSchema。
@@ -645,7 +702,7 @@ int main() {
   test_degenerate_files();
   test_clock();
   test_signal();
-  test_anchor();
+  test_init_ts();
   test_merge();
   test_config();
   test_e2e();

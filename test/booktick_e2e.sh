@@ -6,7 +6,7 @@
 # 真能被独立消费者按 v1.2.2 布局读懂」—— 跨进程契约只有这样才测得到。退出码 0=通过。
 set -uo pipefail
 
-readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # 脚本在 test/,工程根在上一级
 readonly BIN="$DIR/build/linux/x86_64/release/mdreplay"
 readonly SEG="/shm_booktick_e2e"
 readonly TMP="$(mktemp -d)"
@@ -30,7 +30,15 @@ CSV
 
 # ── 跑 mdreplay：book → BookTickBoard 段 ──────────────────────────────────────────────────
 echo "[1/3] mdreplay book → $SEG"
-"$BIN" --kind book --dir "$TMP/data" --format csv --output.path "$SEG" --output.create true --realtime 0 \
+cat > "$TMP/config.toml" <<EOF
+realtime = 0
+[[replays]]
+input  = { format = "csv", dir = "$TMP/data", kind = "book" }
+output = { path = "$SEG", create = true }
+[log]
+level = "info"
+EOF
+"$BIN" --config "$TMP/config.toml" \
   2>&1 | grep -E 'done' || die "mdreplay 回放失败"
 
 # ── 编译独立消费者，按 v1.2.2 BookTickBoard 契约读回 ───────────────────────────────────────
